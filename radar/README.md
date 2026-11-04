@@ -52,6 +52,32 @@ Returns decision=deny only for an address on the configured denylist; otherwise 
 5. Real security productization requires verified threat intelligence, decoded transactions and balances, pre-sign simulation, authenticated multi-tenant services, incident evidence, secure alerts, independent review and wallet/dApp enforcement integrations.
 6. Watch addresses may be sensitive. Keep seed phrases, private keys, lab DNA data and other personal secrets off the dashboard and RPC provider.
 
+
+## Kali Linux security integration — first real sensor
+
+Hunter Radar now supports **read-only Suricata EVE JSON intrusion detection telemetry** alongside Solana mainnet observations. Suricata can run inside an authorized Kali Linux VM or a dedicated security-monitoring system. This does not depend on our own Hunter Guard program.
+
+1. Install/configure a Suricata sensor on networks and systems you own or have authorization to monitor. Enable its standard EVE JSON alert output according to your installed Suricata configuration. The file is commonly called eve.json.
+2. Make that log file readable by the same Linux user running Hunter Radar. In separate Kali/Ubuntu VMs, use a **securely managed log export**; do not expose the EVE file or the dashboard unauthenticated over the network.
+3. Set the file path and start Radar:
+
+       export HUNTER_RADAR_SURICATA_EVE_FILE='/var/log/suricata/eve.json'
+       cd radar
+       node server.mjs
+
+4. Open the new **Kali Sensors** screen. Only *newly appended* alerts are counted from the time the file monitor starts. The dashboard reports Suricata's observed alerts and actions; it does not invent activity or claim that alerts were necessarily blocked.
+5. Run the Kali integration tests with:
+
+       node --test test/suricata.test.mjs
+
+The backend deliberately excludes source/destination IP addresses, raw payloads and packet contents from browser output. It tracks file discontinuities and read failures instead of reporting full coverage. If no local sensor is configured, the GUI says so.
+
+**What Kali brings next:** authorized network asset discovery (Nmap), passive traffic inspection (Zeek/tshark), local signature rules (Suricata), static artifact inspection (YARA), smart-contract and wallet threat intelligence, and quarantine of traffic/resources **that the operator owns or controls**. External exploitation, hack-back, and retaliatory activity are not implemented or part of Hunter Radar's defensive operation. None of these additional tool integrations are claimed complete.
+
+**Solana distinction:** Suricata can detect traffic affecting our own RPC endpoints, applications and servers. It cannot inspect or quarantine arbitrary Solana validator processes, and its local network alerts must never be automatically attributed to on-chain accounts. True application protection requires wallet/dApp policy enforcement and validated on-chain risk analysis.
+
+**Cloudflare boundary:** The current first sensor is local-file-based; it is **not deployed to Cloudflare**. A future authenticated telemetry uplink or managed container would be needed to securely stream sanitized Kali events into a Cloudflare-hosted customer dashboard.
+
 ## Verification
 
 Run the offline deterministic logic tests with:
