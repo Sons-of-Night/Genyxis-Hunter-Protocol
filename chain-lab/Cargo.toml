@@ -1,0 +1,34 @@
+[package]
+name = "hunter-chain-lab"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[test]]
+name = "guard"
+path = "tests/guard.rs"
+
+[dev-dependencies]
+hunter-guard = { path = "../program", features = ["no-entrypoint"] }
+anchor-lang = "=1.2.0"
+litesvm = "=0.15.2"
+# Keep the coupled Agave test runtime on the same line as Genyxis.
+agave-feature-set = "=4.1.1"
+agave-reserved-account-keys = "=4.1.1"
+solana-syscalls = "=4.1.1"
+solana-builtins = "=4.1.1"
+solana-compute-budget = "=4.1.1"
+solana-compute-budget-instruction = "=4.1.1"
+solana-fee = "=4.1.1"
+solana-program-runtime = "=4.1.1"
+solana-svm-callback = "=4.1.1"
+solana-svm-log-collector = "=4.1.1"
+solana-svm-timings = "=4.1.1"
+solana-svm-transaction = "=4.1.1"
+solana-system-program = "=4.1.1"
+solana-transaction-context = "=4.1.1"
+solana-account = "=4.3.0"
+solana-message = "=4.2.4"
+solana-transaction = { version = "=4.1.5", features = ["wincode"] }
+solana-signer = "=3.0.1"
+solana-keypair = "=3.1.2"
