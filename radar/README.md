@@ -19,6 +19,7 @@ Node.js 22 or later required. From the repository root:
 
     cd radar
     node --version
+    npm ci
     node --test test/*.test.mjs
 
     export HUNTER_RADAR_RPC_HTTP='https://api.mainnet.solana.com'
@@ -45,12 +46,38 @@ Returns decision=deny only for an address on the configured denylist; otherwise 
 
 Send up to 64 addresses in each array and keep the UTF-8 JSON body within 8 KiB. Requests larger than 8 KiB receive HTTP 413. Use a loopback hostname or address in the request URL.
 
+## Protected SOL withdrawal signing
+
+The withdrawal guard runs inside a separate, trusted signer. It addresses the signing-service bypass Binance described after the October 29, 2026 theft. A withdrawal container can propose a transfer, but the signer requires an independent approval even when the transfer looks ordinary and its destination has no known threat history. [Binance preliminary incident findings](https://www.binance.com/en/square/post/384328127385979)
+
+1. Give the approval service a separate Ed25519 key and identity. Independently verify the withdrawal against your authorization records. Use `inspectWithdrawal(transaction)` to review the signer, destination, and amount in lamports before approving. Sign `withdrawalApprovalMessage(transaction, expiresAt)` with the approval key. Supply `{expiresAt, signature}` to the signer, with expiry in Unix milliseconds up to 60 seconds ahead and the Ed25519 signature in base64.
+2. Keep the withdrawal key and its KMS permissions outside the withdrawal application, its CI/CD role, and the Radar dashboard. Configure the signer with the approval public key, a destination allowlist, and a per-transfer cap. Make the guard the only application path to the withdrawal key. Use distinct, separately managed access for approval and signer policy changes.
+3. Configure a trusted Solana HTTPS RPC and a Blockaid API key in the isolated service. Each approved request checks the RPC's mainnet identity, simulates the exact unsigned transaction, and requests a new Blockaid verdict. An outage, failed simulation, warning, or missing verdict withholds the signature. Both providers receive the unsigned transaction. Blockaid also receives the signer’s public address. [Solana simulation API](https://solana.com/docs/rpc/http/simulatetransaction) · [Blockaid Solana API](https://github.com/blockaid-official/blockaid-client-node/blob/main/src/resources/solana/message.ts)
+
+```js
+import {createProtectedWithdrawalSigner} from './withdrawal-guard.mjs';
+
+const signWithdrawal = createProtectedWithdrawalSigner({
+  signerAddress: config.walletAddress,
+  approverPublicKey: config.approverPublicKeyPem,
+  allowedDestinations: config.treasuryAddresses,
+  maxLamports: BigInt(config.maxWithdrawalLamports),
+  blockaidApiKey: process.env.BLOCKAID_CLIENT_API_KEY,
+  rpcUrl: config.mainnetRpcUrl,
+  signMessage: (messageBytes, {signal}) => isolatedSigner.signEd25519(messageBytes, {signal})
+});
+
+const signedTransaction = await signWithdrawal({transaction, approval});
+```
+
+`transaction` is a canonical base64 Solana wire transaction with a zeroed signature slot. The guard permits a single native SOL transfer in legacy or v0 format, with a recent blockhash, one signer, and no lookup tables or extra instructions. The adapter returns a raw 64-byte Ed25519 signature. The guard verifies it against the original message and returns a base64 signed transaction for the caller to submit. This is a per-transfer policy for designated wallets and treasury destinations. Token withdrawals, swaps, v1 transactions, durable nonces, and other chains are outside its scope. The dashboard remains a separate read-only service. Live signer and provider acceptance tests are pending.
+
 ## Current limits
 
 1. The activity timeline aggregates the current minute and the previous 14 minutes independently of event details (500 in memory, 100 sent to the dashboard). The last 65,536 distinct signatures are tracked for deduplication during the session. Stream gaps are not backfilled, and confirmed transactions can still be reorganized.
 2. An all-logs subscription may not provide complete reliable network coverage due to provider limits. Production requires durable indexing, Yellowstone/Geyser streaming, missed-slot backfill and coverage metrics.
 3. No validated classification of malicious AI agents, drainers, exploits, safe contracts or infected wallets. Simple failed transactions are not attacks.
-4. Operator-configured denylist only; policy decisions are recommendations and not proof that an on-chain attack was blocked.
+4. The dashboard’s address policy remains advisory. Enforcement applies when an isolated wallet signer integrates the protected SOL withdrawal guard.
 5. Real security productization requires verified threat intelligence, decoded transactions and balances, pre-sign simulation, authenticated multi-tenant services, incident evidence, secure alerts, independent review and wallet/dApp enforcement integrations.
 6. Watch addresses may be sensitive. Keep seed phrases, private keys, lab DNA data and other personal secrets off the dashboard and RPC provider.
 
