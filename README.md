@@ -1,5 +1,11 @@
 # Genyxis Hunter Protocol
 
+## Hunter Radar — Solana mainnet security operations
+
+The separate [Hunter Radar application](radar/README.md) monitors real Solana mainnet transaction logs, displays live charts and a 3D observation map, and provides a configurable policy-check API. It does not depend on the synthetic rewards campaign or pretend to block arbitrary mainnet transactions. This is a development foundation, not production-verified security.
+
+
+
 **0.1.0 · Development prototype · Synthetic rewards claims**
 
 Hunter checks a protected action before a participating Solana program records it. The first action is a campaign claim. The example records a receipt and uses synthetic data.
