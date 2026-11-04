@@ -71,6 +71,42 @@ function renderChart(data) {
   elem('text',{x:35,y:157},'15 minutes ago');
   elem('text',{x:615,y:157},'Now');
 }
+
+function renderKali(snapshot){
+  const kali=snapshot.kali||{configured:false,ready:false,alerts:0,sensorReportedBlocks:0,rotationOrSkipCount:0,events:[]};
+  text('mKaliAlerts',formatter.format(kali.alerts));
+  text('kaliAlertCount',formatter.format(kali.alerts));
+  text('kaliBlockCount',formatter.format(kali.sensorReportedBlocks));
+  text('kaliGaps',formatter.format(kali.rotationOrSkipCount));
+  text('sKali',!kali.configured?'Not configured':kali.ready?'Receiving file':'Log unavailable');
+  text('kaliBadge',!kali.configured?'UNCONFIGURED':kali.ready?'LOCAL SENSOR CONNECTED':'SENSOR OFFLINE');
+  const feed=byId('kaliFeed');
+  feed.replaceChildren();
+  if(!kali.events.length){
+    const empty=document.createElement('div');
+    empty.className='empty';
+    empty.textContent=!kali.configured?'No local Kali Suricata sensor configured.':kali.ready?'No new Suricata alert events have been received.':'Kali sensor data is unavailable.';
+    feed.append(empty);
+  } else {
+    for(const event of kali.events){
+      const line=document.createElement('article');line.className='feed-item';
+      const marker=document.createElement('span');
+      marker.className='feed-symbol'+(event.action==='sensor-reported-block'?' policy':' failed');
+      marker.textContent=event.action==='sensor-reported-block'?'■':'!';
+      const body=document.createElement('div');
+      const title=document.createElement('b');title.textContent=event.signature;
+      const details=document.createElement('small');
+      details.textContent=(event.action==='sensor-reported-block'?'SENSOR-REPORTED BLOCK':'IDS ALERT')+
+        ' · Severity '+(event.severity??'?')+' · '+event.classification+
+        (event.protocol?' · '+event.protocol:'');
+      body.append(title,details);
+      const time=document.createElement('time');
+      time.textContent=new Date(event.observedAt).toLocaleTimeString();
+      line.append(marker,body,time);feed.append(line);
+    }
+  }
+}
+
 function render(snapshot) {
   const connected=snapshot.connected && snapshot.subscribed;
   const status=byId('liveStatus');
@@ -80,6 +116,7 @@ function render(snapshot) {
   text('sideState',connected?'MAINNET FEED CONNECTED':'MAINNET FEED NOT READY');
   text('rpcStatus',snapshot.rpcOk?'RPC • SLOT '+formatter.format(snapshot.currentSlot):'RPC unavailable');
   text('lastReceived',timeAgo(snapshot.lastEventAt));
+  renderKali(snapshot);
   text('mObserved',formatter.format(snapshot.counters.observed));
   text('mFailed',formatter.format(snapshot.counters.failed));
   text('mWatched',formatter.format(snapshot.counters.watchObserved));
@@ -98,6 +135,7 @@ function render(snapshot) {
   if(snapshot.rpcError)warnings.push('RPC health: '+snapshot.rpcError);
   if(snapshot.gapCount)warnings.push(snapshot.gapCount+' connection interruption(s) since startup; missing transactions were not recovered.');
   if(snapshot.denylistSize===0)warnings.push('No denylist is configured. Policy-match detections are disabled.');
+  if(snapshot.kali?.configured && !snapshot.kali.ready)warnings.push('Kali sensor: '+(snapshot.kali.lastError||'Log unavailable'));
   const warning=byId('warning');
   warning.hidden=warnings.length===0;
   warning.textContent=warnings.join(' • ');
@@ -119,7 +157,7 @@ function selectPage(page){
   currentPage=page;
   for(const tab of document.querySelectorAll('.nav'))tab.classList.toggle('active',tab.dataset.page===page);
   for(const section of document.querySelectorAll('.page'))section.classList.toggle('visible',section.id==='page-'+page);
-  const title={overview:'Overview',activity:'Live Activity',watchlist:'Watchlist',policy:'Policy Check',about:'Coverage & Limits'};
+  const title={overview:'Overview',activity:'Live Activity',watchlist:'Watchlist',kali:'Kali Sensors',policy:'Policy Check',about:'Coverage & Limits'};
   byId('pageTitle').replaceChildren(document.createTextNode('Hunter Radar '));
   const s=document.createElement('span');s.textContent=title[page];byId('pageTitle').append(s);
 }
@@ -213,6 +251,14 @@ function draw(){
       ctx.beginPath();ctx.arc(p.x,p.y,7,0,Math.PI*2);ctx.stroke();
     }
   }
+  // Distinct outer 3D layer: genuine local Kali IDS alerts, never Solana transactions.
+  const alerts=(latest?.kali?.events||[]).slice(0,35);
+  alerts.forEach((event,i)=>{
+    const p=project(position(event.signature+event.observedAt),angle+.6,radius*1.22,cx,cy);
+    const rr=event.action==='sensor-reported-block'?4.2:3;
+    ctx.fillStyle=event.action==='sensor-reported-block'?'rgba(255,116,140,.95)':'rgba(255,188,105,.85)';
+    ctx.beginPath();ctx.moveTo(p.x,p.y-rr);ctx.lineTo(p.x+rr,p.y+rr);ctx.lineTo(p.x-rr,p.y+rr);ctx.closePath();ctx.fill();
+  });
   ctx.strokeStyle='rgba(52,203,238,.3)';ctx.beginPath();
   ctx.ellipse(cx,cy+radius*.73,radius*1.13,radius*.28,0,0,Math.PI*2);ctx.stroke();
   if(!(latest?.events?.length)){
