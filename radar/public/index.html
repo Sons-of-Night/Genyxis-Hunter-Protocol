@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#080e1e">
+  <title>Hunter Radar | Solana Security Operations</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand"><span class="logo">H<span>R</span></span><div><strong>HUNTER <em>RADAR</em></strong><small>GENYXIS / SOLANA DEFENSE</small></div></div>
+    <div class="side-label">OPERATIONS</div>
+    <nav aria-label="Dashboard sections" id="navigation">
+      <button class="nav active" data-page="overview"><span>◈</span> Overview</button>
+      <button class="nav" data-page="activity"><span>⌁</span> Live Activity</button>
+      <button class="nav" data-page="watchlist"><span>◎</span> Watchlist</button>
+      <button class="nav" data-page="policy"><span>⬡</span> Policy Check</button>
+      <button class="nav" data-page="about"><span>◇</span> Coverage & Limits</button>
+    </nav>
+    <div class="sidebar-bottom">
+      <div class="dotline"><i class="dot" id="sideDot"></i><span id="sideState">CONNECTING TO MAINNET</span></div>
+      <p>Only verified chain observations. No simulated threats or invented defense actions.</p>
+      <span class="build">HUNTER RADAR • ENGINE v0.1</span>
+    </div>
+  </aside>
+  <main class="main">
+    <header class="topbar">
+      <div class="breadcrumbs">GENYXIS <span>/</span> HUNTER PROTOCOL <span>/</span> RADAR</div>
+      <div class="top-status"><span class="mainnet">● SOLANA MAINNET</span><span id="rpcStatus">RPC checking…</span><span id="liveStatus" class="status muted">Connecting</span></div>
+    </header>
+    <div class="content">
+      <div class="heading"><div><p class="eyebrow">LIVE SOLANA SECURITY INTELLIGENCE</p><h1 id="pageTitle">Hunter Radar <span>Overview</span></h1><p class="sub">Real on-chain observations, configured risk signals, and pre-sign policy decisions.</p></div><div class="heading-actions"><span class="label-info" id="lastReceived">No events received</span><button id="pauseButton" class="outline">Pause view</button></div></div>
+      <div id="warning" class="warning" hidden></div>
+
+      <section id="page-overview" class="page visible" aria-label="Overview">
+        <div class="metrics" id="metricTiles">
+          <div class="metric"><span>OBSERVED TRANSACTIONS</span><strong id="mObserved">—</strong><small>Since this process started</small></div>
+          <div class="metric"><span>FAILED TRANSACTIONS</span><strong id="mFailed">—</strong><small>Not inherently malicious</small></div>
+          <div class="metric"><span>WATCHED ACTIVITY</span><strong id="mWatched">—</strong><small>Monitored addresses</small></div>
+          <div class="metric highlight"><span>POLICY MATCHES</span><strong id="mMatches">—</strong><small>Operator denylist hits</small></div>
+          <div class="metric"><span>PRE-SIGN DENY DECISIONS</span><strong id="mDenied">—</strong><small>Only API recommendations</small></div>
+        </div>
+        <div class="dashboard-grid">
+          <section class="panel orb-panel">
+            <div class="panel-title"><div><h2>Live Chain Defense Map</h2><p>3D projection of actual observed Solana transactions</p></div><span class="chip" id="sceneBadge">Awaiting feed</span></div>
+            <div class="orb-wrap"><canvas id="defenseCanvas" aria-label="Rotating 3D representation of recently observed transaction activity"></canvas><div class="orb-core"><span class="shield-icon">⬡</span><b>HUNTER</b><small>RADAR</small></div><div class="orb-footer"><span><i class="legend success"></i> Confirmed observation</span><span><i class="legend fail"></i> Failed transaction</span><span><i class="legend warning"></i> Configured policy match</span></div></div>
+            <div class="orb-notice">Visualization reflects received data only. A displayed transaction is not proof of an attack.</div>
+          </section>
+          <section class="panel feed-panel">
+            <div class="panel-title"><div><h2>Chain Activity</h2><p>Received mainnet transaction logs</p></div><span class="chip live" id="feedCount">0 received</span></div>
+            <div class="feed-items" id="overviewFeed"><div class="empty">Waiting for real mainnet observations…</div></div>
+          </section>
+          <section class="panel chart-panel">
+            <div class="panel-title"><div><h2>Activity Timeline</h2><p>Observed messages by minute • last 15 minutes</p></div><span class="chip">LIVE</span></div>
+            <div class="chart-legend"><span><i class="legend success"></i> Observed</span><span><i class="legend fail"></i> Failed</span><span><i class="legend warning"></i> Policy matches</span></div>
+            <svg id="trend" class="timeline" viewBox="0 0 700 160" role="img" aria-label="Chart of observed transaction messages in the past 15 minutes"><text x="20" y="83">No data yet</text></svg>
+          </section>
+          <section class="panel service-panel">
+            <div class="panel-title"><div><h2>Defensive Capabilities</h2><p>Actual service and integration state</p></div></div>
+            <div class="service-row"><span class="service-ico">⌁</span><div><b>Mainnet stream</b><small>Observe Solana transaction logs</small></div><span id="sStream">Checking</span></div>
+            <div class="service-row"><span class="service-ico">◎</span><div><b>Address watchlist</b><small>Focused monitoring for configured accounts</small></div><span id="sWatch">Unconfigured</span></div>
+            <div class="service-row"><span class="service-ico">⬡</span><div><b>Policy intelligence</b><small>Match observed programs to operator denylist</small></div><span id="sPolicy">Unconfigured</span></div>
+            <div class="service-row"><span class="service-ico">✓</span><div><b>Pre-sign check API</b><small>Integrated clients can honor deny decisions</small></div><span id="sAssessment">Available locally</span></div>
+          </section>
+        </div>
+      </section>
+
+      <section id="page-activity" class="page panel">
+        <div class="panel-title"><div><h2>Live Transaction Observations</h2><p>Only Solana transaction notifications actually received</p></div><label class="toggle"><input type="checkbox" id="filterFindings"> Policy matches only</label></div>
+        <div id="fullFeed" class="feed-items full"><div class="empty">Awaiting mainnet connection…</div></div>
+      </section>
+
+      <section id="page-watchlist" class="page panel">
+        <div class="panel-title"><div><h2>Monitored Addresses</h2><p>Each address receives its own targeted logs subscription</p></div><span id="watchCount" class="chip">0 configured</span></div>
+        <div id="watchedAddresses" class="watch-list"><div class="empty">No configured wallet or program addresses.</div></div>
+        <div class="footnote">Configure with the environment variable <code>HUNTER_RADAR_WATCH_ADDRESSES</code> (comma-separated public addresses), then restart Radar. No private keys are required.</div>
+      </section>
+
+      <section id="page-policy" class="page panel">
+        <div class="panel-title"><div><h2>Pre-Sign Policy Check</h2><p>Real API decision using the configured denylist — not transaction simulation</p></div><span class="chip">LOCAL API</span></div>
+        <p class="caution">This endpoint does not submit, stop, or sign transactions. A wallet or dApp must integrate it and enforce its decision before signing.</p>
+        <form id="policyForm">
+          <label for="programIds">Program public keys (comma or newline separated)</label><textarea id="programIds" rows="3" placeholder="Enter Solana program public keys…" required></textarea>
+          <label for="accountIds">Other account public keys (optional)</label><textarea id="accountIds" rows="2" placeholder="Enter recipient or account addresses…"></textarea>
+          <button class="primary" type="submit">Assess against real policy</button>
+        </form>
+        <div id="assessmentResult" class="result">No assessment performed.</div>
+        <div class="footnote">Policy source: <code>HUNTER_RADAR_DENY_ADDRESSES</code>. Zero entries means zero configured detections — not proof of safety.</div>
+      </section>
+
+      <section id="page-about" class="page panel">
+        <div class="panel-title"><div><h2>Coverage and Limitations</h2><p>Honest operational scope for a commercial security service</p></div></div>
+        <div class="info-grid">
+          <div><h3>What is live</h3><p>Solana mainnet WebSocket logs for all non-vote transactions supplied by the configured RPC, independent watched-address streams, chain slot health, and operator-defined policy matches.</p></div>
+          <div><h3>What is not claimed</h3><p>This is not comprehensive historical indexing, an audited malware detector, AI-agent attribution, wallet custody, network censorship, or guaranteed prevention of attacks.</p></div>
+          <div><h3>Coverage gaps</h3><p>Provider throttling, dropped WebSocket messages and connection outages can cause missing events. Real production monitoring needs durable streaming and backfill, such as Yellowstone gRPC.</p></div>
+          <div><h3>Pre-transaction protection</h3><p>The read-only assessment API can recommend denial for configured addresses. To actually stop a user from authorizing a transaction, an integrated wallet or dApp must act on that result.</p></div>
+        </div>
+        <div class="footnote">Server binds to loopback. It never asks for wallet seed phrases or changes the existing Genyxis validator, keys, ledger, or PostgreSQL state.</div>
+      </section>
+      <footer class="footer"><span>GENYXIS HUNTER PROTOCOL • RADAR</span><span id="coverage">Real mainnet telemetry • Session-only counters</span></footer>
+    </div>
+  </main>
+</div>
+</body></html>
