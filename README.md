@@ -1,49 +1,106 @@
 # Genyxis Hunter Protocol
 
-## Hunter Radar — Solana mainnet security operations
+**Defensive security infrastructure for the Solana ecosystem**
 
-The separate [Hunter Radar application](radar/README.md) monitors real Solana mainnet transaction logs, displays live charts and a 3D observation map, and provides a configurable policy-check API. It does not depend on the synthetic rewards campaign or pretend to block arbitrary mainnet transactions. This is a development foundation, not production-verified security.
+Hunter is a Genyxis initiative to help Solana developers and operators **observe activity, investigate evidence-based threats, and enforce security decisions at infrastructure they control**. Its first operator-facing product is **Hunter Radar**: a local security console that combines actual Solana mainnet observations with Kali Linux-inspired network intrusion telemetry.
 
+> **Status: development / research prototype.** Hunter Radar is not independently audited or production-ready. It does not detect every threat, identify "enemy AI" by appearance, prevent arbitrary Solana mainnet transactions, or hack back against third parties. The live dashboard does not fabricate transactions or alerts.
 
+## Start here
 
-**0.1.0 · Development prototype · Synthetic rewards claims**
+| Component | What it does | Current status |
+| --- | --- | --- |
+| **Hunter Radar** (`radar/`) | Reads Solana mainnet transaction logs, displays live activity and slot health, offers a local pre-sign policy API, and ingests Suricata EVE alerts | Implemented development foundation; target-host and live-feed verification still needed |
+| **Kali / Suricata sensor** (`radar/kali/`) | Reads newly appended EVE JSON intrusion alerts from a locally authorized sensor and presents sanitized alert metadata | Integration implemented; real loopback capture verification is in [draft PR #3](https://github.com/Sons-of-Night/Genyxis-Hunter-Protocol/pull/3) |
+| **Hunter Guard** (`program/`) | Anchor/Solana program prototype that requires issuer authorization and records one claim receipt per campaign and claimant | Isolated synthetic-rewards proof of concept; not the Radar product |
+| **Offline / chain labs** (`lab/`, `chain-lab/`) | Test authorization, signing, expiry and replay-resistance assumptions | Fixtures and test harness supplied; native Solana SBF/LiteSVM execution must be verified on a configured host |
 
-Hunter checks a protected action before a participating Solana program records it. The first action is a campaign claim. The example records a receipt and uses synthetic data.
+These tracks are related, but **Hunter Radar runs independently of the synthetic rewards campaign and Hunter Guard**.
 
-## Run the demo on Ubuntu or WSL
+## Hunter Radar — run locally
 
-Extract the ZIP, open a terminal in `Genyxis-Hunter-Protocol`, and run these commands with Node.js 20 or later. The offline lab uses Node's built-in Ed25519 support and needs no package install.
+**Requirements:** Linux (Ubuntu, Kali, or WSL) and **Node.js 22+**. Radar uses Node's built-in runtime APIs; no third-party npm package installation is required for the current server.
+
+```bash
+git clone https://github.com/Sons-of-Night/Genyxis-Hunter-Protocol.git
+cd Genyxis-Hunter-Protocol/radar
+
+node --version
+npm test
+
+export HUNTER_RADAR_RPC_HTTP='https://api.mainnet.solana.com'
+export HUNTER_RADAR_RPC_WS='wss://api.mainnet.solana.com'
+
+npm start
+```
+
+Open **http://127.0.0.1:4190** on the same computer. Radar binds to loopback by default. Visit **http://127.0.0.1:4190/api/health** to view raw health data. A useful live-feed check is `rpcOk: true`, an integer `currentSlot`, `subscribed: true` and a rising `counters.observed` value as transactions arrive. Press **Ctrl+C** to stop.
+
+The public mainnet endpoints may rate-limit or reject broad `logsSubscribe` requests. **A failed connection, low count, or gap is not evidence of an empty or safe network.** Commercial monitoring needs a suitable streaming/indexing provider, durable storage, gap recovery and finalized-state reconciliation.
+
+### Optional configuration
+
+| Variable | Purpose |
+| --- | --- |
+| `HUNTER_RADAR_RPC_HTTP` | Solana mainnet HTTPS JSON-RPC endpoint |
+| `HUNTER_RADAR_RPC_WS` | Solana mainnet secure WebSocket endpoint |
+| `HUNTER_RADAR_WATCH_ADDRESSES` | Comma-separated public Solana addresses to watch; maximum 12 |
+| `HUNTER_RADAR_DENY_ADDRESSES` | Comma-separated operator-configured public addresses used by the policy API |
+| `HUNTER_RADAR_SURICATA_EVE_FILE` | Absolute path of a locally readable Suricata `eve.json` alert log |
+
+Only use **public wallet/program addresses**. Never enter seed phrases, private keys, API secrets or identity data into address lists, logs, screenshots or issues.
+
+### Local pre-sign policy API
+
+A participating wallet, dApp or transaction service can ask Hunter for a policy recommendation:
+
+```bash
+curl -sS -X POST http://127.0.0.1:4190/api/assess \
+  -H 'Content-Type: application/json' \
+  -d '{"programIds":["11111111111111111111111111111111"],"accounts":[]}'
+```
+
+- `decision: "deny"` means an address matched the **operator's configured denylist**.
+- `decision: "no_match"` means there was no configured match. **It does not mean safe.**
+- Hunter currently **does not simulate, sign, broadcast, reverse or globally block** Solana transactions. A protected application must explicitly integrate and enforce its own decision.
+
+Do not expose the unauthenticated local API directly to the internet.
+
+## Kali-inspired security: first real sensor
+
+Hunter Radar currently supports **read-only Suricata EVE JSON alert ingestion**, not a full suite of Kali tools.
+
+1. On a Genyxis-owned or explicitly authorized Linux host, install and configure Suricata to inspect traffic the operator is entitled to monitor. Check it with `suricata -V`.
+2. Configure Suricata EVE `alert` output, and arrange read access for the non-root Radar process. A common path is `/var/log/suricata/eve.json`.
+3. Start Radar with the EVE path configured:
+
+```bash
+cd Genyxis-Hunter-Protocol/radar
+export HUNTER_RADAR_SURICATA_EVE_FILE='/var/log/suricata/eve.json'
+npm start
+```
+
+4. Open the **Kali Sensors** view. Only alerts appended after the file follower starts are counted. Sensor errors and skipped/rotated log gaps must be treated as reduced coverage.
+5. Test the parser with `npm test` or `node --test test/suricata.test.mjs`.
+
+**Real sensor acceptance test:** [draft PR #3](https://github.com/Sons-of-Night/Genyxis-Hunter-Protocol/pull/3) introduces `npm run verify:suricata`, a controlled loopback capture check for Kali/Ubuntu. **That command is not on `main` until the PR is merged.** Running it successfully on the intended host is still pending. Keep the Suricata loopback result separate from Solana mainnet stream validation.
+
+Radar's browser output omits raw packet data and source/destination IPs from parsed Suricata alerts. It must not infer that an intrusion alert identifies a malicious on-chain wallet, or that a reported alert was blocked. Cloudflare ingest, remote sensors, tenancy, authentication and managed retention are **not yet implemented**.
+
+See [radar/README.md](radar/README.md) for detailed sensor setup, limitations and testing instructions.
+
+## Hunter Guard research prototype
+
+Hunter Guard is a **separate** authorization/replay-resistance experiment. Its sample campaign uses synthetic eligibility, an issuer co-signature, bounded slot expiry and a program-derived claim receipt. It demonstrates how an integrating program can constrain a protected action; it is **not a mechanism for censoring public blockchain traffic**.
+
+Run the offline Node lab from the repository root:
 
 ```bash
 node lab/demo.mjs
 node --test lab/hunter.test.mjs
 ```
 
-| Scenario | Expected |
-| --- | --- |
-| Eligible wallet and authorized issuer | Accept one claim |
-| Reused permit or freshly signed second claim | Reject the duplicate |
-| Direct call without issuer approval | Reject the claim |
-| Permit copied to another wallet or modified | Reject the signature |
-| Expired or excessively long permit | Reject the expiry |
-| Eligible automated client | Apply the same rules and accept |
-
-The model signs its own fixed-format claim message and keeps receipts in process. Solana instead verifies both signatures on the complete transaction message and persists the receipt in a program-owned account. The model test result applies to the model. The separate chain lab is the acceptance check for the program.
-
-## Protocol v0.1
-
-1. A campaign administrator creates a campaign with a dedicated issuer. Its Solana address is derived from the admin and a 32-byte campaign identifier.
-2. The prospective claimant authorizes the claim. The issuer checks its eligibility policy and co-signs the exact transaction. The transaction contains the campaign, claimant, claim instruction, and slot expiry. The issuer builds or fully validates the exact message before signing. Integrators pin the expected program and campaign.
-3. Hunter Guard requires both signers and checks the issuer against the campaign account. It accepts an expiry 1 to 150 slots ahead at execution and relies on Solana's normal recent-blockhash checks.
-4. Hunter Guard records the claim at the program-derived address for the campaign and claimant. Creating that same account again fails, including with a newly signed transaction. A failing transaction leaves no new receipt.
-
-Each campaign depends on the issuer's eligibility policy. A wallet address alone establishes neither human identity nor malicious intent. The fixture uses a synthetic allowlist. The guard contains a single claim action and does not move tokens or hold custody. The campaign stores a fixed issuer for this milestone. Issuer rotation, policy administration, and an integration-specific access model need design and testing before a customer pilot.
-
-## Run the Solana acceptance check
-
-Use the Rust and Solana SBF tools from your Genyxis development setup. The program uses Anchor 1.2.0, and the SBF command follows Genyxis's Solana 3.1.10 and platform-tools v1.52 build. The isolated chain lab uses LiteSVM and creates ephemeral test wallets in process. It has no RPC endpoint or connection to fresh-v1.
-
-From the extracted folder:
+For Solana SBF and LiteSVM acceptance testing, use a host with the project's Rust/Solana toolchain installed:
 
 ```bash
 mkdir -p target/deploy
@@ -51,11 +108,37 @@ cargo build-sbf --arch v2 --tools-version v1.52 --manifest-path program/Cargo.to
 cargo test --manifest-path chain-lab/Cargo.toml --test guard -- --nocapture
 ```
 
-The chain test checks missing and wrong issuer approval, expired and overlong permits, the first successful receipt, and a second transaction with a new approval. It prints the compute units consumed by the successful claim. The program ID in the source is for the in-process fixture. Both Rust commands require their toolchain and dependency access. They are pending execution on a Solana-equipped host.
+These commands are **validation steps**, not claims that a chain build, deployment or audit has passed. The program ID is for an isolated fixture, not a public mainnet deployment. Keep this lab separate from the preserved Genyxis fresh-v1 validator, ledger, keys, PostgreSQL and operator console.
 
-## Pilot milestones
+## Repository structure
 
-1. Run the chain test and capture its result and compute units.
-2. Add a staging issuer that constructs exactly one approved claim transaction. Keep the signing role separate from campaign administration and use a dedicated key. Exercise key rotation, expiry, signer outages, and policy errors before relying on it.
-3. Connect Flytrap for ingress rate limiting and Shadow for observation. Record reason codes and inspect failed-transaction telemetry from the API and RPC. Keep suspicions separate from authorization decisions.
-4. Exercise the staging boundary from an isolated lab using synthetic clients. Measure acceptance for eligible wallets, attempts stopped, and added latency before offering one protected rewards flow as a paid staging pilot.
+```text
+.
+├── README.md         # Project overview and operator quick start
+├── radar/            # Hunter Radar HTTP service, web UI, Kali adapter, tests
+├── program/          # Hunter Guard Solana/Anchor experiment
+├── lab/              # Offline signing/authorization model
+├── chain-lab/        # Isolated Solana/LiteSVM acceptance tests
+└── .github/          # Repository automation/configuration
+```
+
+## Engineering roadmap
+
+The current [Hunter security-engine roadmap (issue #2)](https://github.com/Sons-of-Night/Genyxis-Hunter-Protocol/issues/2) tracks the work. Priorities:
+
+1. **Prove current behavior:** execute the Suricata loopback acceptance check on authorized Kali/Ubuntu equipment; validate mainnet RPC health, subscriptions and observed events separately.
+2. **Make observations trustworthy:** add loss-aware streaming, finalized-state reconciliation, bounded retention, traceable evidence and false-positive testing.
+3. **Improve actual threat detection:** decode transactions and simulations; add verified reputation sources, wallet-drainer indicators and defensible, explainable risk scoring.
+4. **Expand operator-owned network sensors:** passive Zeek/tshark analysis, static YARA scans, scoped Nmap discovery, and explicit consent/authorization controls.
+5. **Provide enforceable response where possible:** integrate wallet/dApp policy gates and customer-controlled ingress/host quarantine, with approval, rollback and audit trails.
+6. **Build secure commercial infrastructure:** authenticated Cloudflare telemetry intake, tenant isolation, encryption, access controls, durability, retention and independent security review.
+
+**Scope limit:** Hunters may observe public on-chain activity and protect infrastructure/customers that authorize the integration. They do not exploit, retaliate against, or forcibly disable unrelated wallets, agents, validators, nodes or hosts.
+
+## Security, disclosure and contributions
+
+This repository is **public**. Do not commit credentials, key material, customer identifiers, private security rules, sensitive sensor logs or captured network payloads. Use synthetic fixtures or thoroughly sanitized evidence in issues and pull requests.
+
+For a suspected security flaw, coordinate a private disclosure with the maintainers rather than posting working exploit details or secrets in a public issue. For ordinary bugs, tests or feature work, use a scoped issue/PR with the exact command, expected result, observed result and environmental details (without secrets).
+
+**Genyxis Hunter Protocol — protect what you control; verify what you claim.**
