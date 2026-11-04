@@ -6,6 +6,7 @@
  */
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
+import { createSuricataMonitor } from './kali/suricata.mjs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -91,6 +92,7 @@ export function createRadar({
   const watch = addresses(env.HUNTER_RADAR_WATCH_ADDRESSES, MAX_WATCH);
   const deny = new Set(addresses(env.HUNTER_RADAR_DENY_ADDRESSES));
   const rpcHost = new URL(httpUrl).hostname;
+  const kaliSensor = createSuricataMonitor(env.HUNTER_RADAR_SURICATA_EVE_FILE,{now});
   let ws = null, stopped = false, connected = false, subscribed = false, lastEventAt = null;
   let rpcOk = false, currentSlot = null, lastRpcAt = null, rpcError = null;
   let lastError = null, reconnections = 0, gapCount = 0, reconnectTimer = null;
@@ -203,7 +205,7 @@ export function createRadar({
       completeness:'Best-effort live feed. Provider throttling, disconnects and retention limits may omit transactions.',
       scope:'All non-vote transaction logs received from selected mainnet RPC since process start; only configured policy matches are flagged.',
       watchCount:watch.length, watchAddresses:watch, denylistSize:deny.size,
-      sessionStartedAt:startedAt, counters:{
+      sessionStartedAt:startedAt, kali:kaliSensor.snapshot(), counters:{
         observed:totalObserved, failed:totalFailed, policyMatches:totalPolicyMatches,
         watchObserved:totalWatchObserved, policyChecks:checks, denyRecommendations
       },
@@ -212,10 +214,12 @@ export function createRadar({
   }
   const startedAt = now();
   function start() {
+    kaliSensor.start();
     connect(); void checkRpc();
     refreshTimer = setInterval(() => { void checkRpc(); },25000);
   }
   function stop() {
+    kaliSensor.stop();
     stopped = true; connected=false; subscribed=false;
     if (reconnectTimer) clearTimeout(reconnectTimer);
     if (refreshTimer) clearInterval(refreshTimer);
