@@ -5,6 +5,7 @@ import {getTransactionDecoder, getTransactionEncoder} from '@solana/transactions
 
 const SYSTEM_PROGRAM = '11111111111111111111111111111111';
 const MAINNET_GENESIS = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d';
+const MAINNET_RPC = 'https://api.mainnet.solana.com';
 const SCAN_URL = 'https://api.blockaid.io/v0/solana/message/scan';
 const APPROVAL_TTL_MS = 60_000;
 const MAX_LAMPORTS = (1n << 64n) - 1n;
@@ -29,6 +30,67 @@ function decodeBase64(value, maxBytes) {
   const bytes = Buffer.from(value, 'base64');
   if (bytes.length > maxBytes || bytes.toString('base64') !== value) throw new Error('Invalid base64 payload');
   return bytes;
+}
+
+function mainnetRpcUrl(rpcUrl) {
+  const url = new URL(rpcUrl);
+  if (url.protocol !== 'https:' || url.username || url.password) {
+    throw new Error('Configure a trusted HTTPS Solana RPC');
+  }
+  return url.href;
+}
+
+async function postJson(fetchImpl, url, body, signal, headers = {}) {
+  const response = await fetchImpl(url, {
+    method:'POST', headers:{'Content-Type':'application/json', ...headers},
+    body:JSON.stringify(body), signal, redirect:'error', cache:'no-store'
+  });
+  if (!response.ok) throw new Error('Upstream HTTP error');
+  return response.json();
+}
+
+async function requireMainnet(fetchImpl, rpc, signal) {
+  const genesis = await postJson(fetchImpl, rpc, {jsonrpc:'2.0',id:1,method:'getGenesisHash'}, signal);
+  if (genesis?.id !== 1 || genesis.error || genesis.result !== MAINNET_GENESIS) {
+    throw new Error('Mainnet identity unavailable');
+  }
+}
+
+export async function prepareWithdrawalProposal({signer, destination, lamports, rpcUrl = MAINNET_RPC, fetchImpl = fetch}) {
+  publicKeyBytes(signer);
+  publicKeyBytes(destination);
+  if (new Set([signer, destination, SYSTEM_PROGRAM]).size !== 3) {
+    throw new Error('Use distinct wallet and destination addresses');
+  }
+  if (typeof lamports !== 'string' || !/^[1-9][0-9]{0,19}$/.test(lamports) || BigInt(lamports) > MAX_LAMPORTS) {
+    throw new Error('Specify lamports as a positive decimal string within the Solana amount limit');
+  }
+  const rpc = mainnetRpcUrl(rpcUrl);
+  const signal = AbortSignal.timeout(6_000);
+  let blockhash, lastValidBlockHeight;
+  try {
+    await requireMainnet(fetchImpl, rpc, signal);
+    const body = await postJson(fetchImpl, rpc, {
+      jsonrpc:'2.0', id:2, method:'getLatestBlockhash', params:[{commitment:'confirmed'}]
+    }, signal);
+    if (body?.id !== 2 || body.error) throw new Error('Bad blockhash response');
+    ({blockhash, lastValidBlockHeight} = body.result.value);
+    publicKeyBytes(blockhash);
+    if (!Number.isSafeInteger(lastValidBlockHeight) || lastValidBlockHeight <= 0) throw new Error('Bad block height');
+  } catch {
+    throw new Error('Unable to obtain a current Solana mainnet blockhash');
+  }
+
+  const transfer = Buffer.alloc(12);
+  transfer.writeUInt32LE(2);
+  transfer.writeBigUInt64LE(BigInt(lamports), 4);
+  const messageBytes = messageCodec.encode({
+    version:'legacy', header:{numSignerAccounts:1,numReadonlySignerAccounts:0,numReadonlyNonSignerAccounts:1},
+    staticAccounts:[signer,destination,SYSTEM_PROGRAM], lifetimeToken:blockhash,
+    instructions:[{programAddressIndex:2,accountIndices:[0,1],data:transfer}]
+  });
+  const transaction = Buffer.from(transactionEncoder.encode({messageBytes, signatures:{[signer]:null}})).toString('base64');
+  return {transaction, lastValidBlockHeight};
 }
 
 // A narrow withdrawal policy keeps lookup tables, CPIs, extra fees and delegated
@@ -82,7 +144,7 @@ export function withdrawalApprovalMessage(transaction, expiresAt) {
 
 export function createProtectedWithdrawalSigner({
   signerAddress, approverPublicKey, allowedDestinations, maxLamports, signMessage,
-  blockaidApiKey, rpcUrl = 'https://api.mainnet.solana.com', fetchImpl = fetch, now = Date.now
+  blockaidApiKey, rpcUrl = MAINNET_RPC, fetchImpl = fetch, now = Date.now
 }) {
   const signerBytes = publicKeyBytes(signerAddress);
   const signer = createPublicKey({format:'jwk', key:{kty:'OKP',crv:'Ed25519',x:signerBytes.toString('base64url')}});
@@ -102,17 +164,7 @@ export function createProtectedWithdrawalSigner({
   if (typeof signMessage !== 'function' || typeof blockaidApiKey !== 'string' || !blockaidApiKey.trim()) {
     throw new Error('Configure the isolated signing adapter and Blockaid API key');
   }
-  const rpc = new URL(rpcUrl);
-  if (rpc.protocol !== 'https:' || rpc.username || rpc.password) throw new Error('Configure a trusted HTTPS Solana RPC');
-
-  async function post(url, body, signal, headers = {}) {
-    const response = await fetchImpl(url, {
-      method:'POST', headers:{'Content-Type':'application/json', ...headers},
-      body:JSON.stringify(body), signal, redirect:'error', cache:'no-store'
-    });
-    if (!response.ok) throw new Error('Upstream HTTP error');
-    return response.json();
-  }
+  const rpc = mainnetRpcUrl(rpcUrl);
 
   return async function signWithdrawal({transaction, approval}) {
     const {withdrawal, decoded} = parseWithdrawal(transaction);
@@ -129,11 +181,8 @@ export function createProtectedWithdrawalSigner({
     const signal = AbortSignal.timeout(6_000);
     let scan;
     try {
-      const genesis = await post(rpc.href, {jsonrpc:'2.0',id:1,method:'getGenesisHash'}, signal);
-      if (genesis?.id !== 1 || genesis.error || genesis.result !== MAINNET_GENESIS) {
-        throw new Error('Mainnet identity unavailable');
-      }
-      const simulation = await post(rpc.href, {
+      await requireMainnet(fetchImpl, rpc, signal);
+      const simulation = await postJson(fetchImpl, rpc, {
         jsonrpc:'2.0',id:2,method:'simulateTransaction',params:[transaction,{
           encoding:'base64',commitment:'confirmed',sigVerify:false,replaceRecentBlockhash:false
         }]
@@ -141,7 +190,7 @@ export function createProtectedWithdrawalSigner({
       if (simulation?.id !== 2 || simulation.error || simulation.result?.value?.err !== null) {
         throw new Error('Transaction simulation did not pass');
       }
-      scan = await post(SCAN_URL, {
+      scan = await postJson(fetchImpl, SCAN_URL, {
         account_address:signerAddress, metadata:{}, transactions:[transaction],
         chain:'mainnet', encoding:'base64', method:'signTransaction', options:['validation']
       }, signal, {'X-API-Key':blockaidApiKey});

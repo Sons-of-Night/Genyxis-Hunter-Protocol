@@ -81,7 +81,14 @@ npm.cmd ci
 node --test .\test\withdrawal-pilot.test.mjs
 ```
 
-For the live pilot, the withdrawal application supplies `unsigned.txt` with the base64 transaction. On the approval host, verify the withdrawal against an independent record. The record JSON must supply `withdrawalId` as a unique lowercase identifier, `signer` and `destination` as Solana addresses, and `lamports` as a decimal string. The approval command compares all three transfer fields, issues a 45-second approval, and prints the receipt path. Keep a single protected receipt directory for the approval role. The withdrawal application must have no write access to the records or receipts and no access to the approval key. The command refuses a second approval for the same ID, even with a different blockhash. Reconcile the earlier request before issuing any replacement.
+For the live pilot, run `--address` with the pilot key's full KMS ARN. This reads the public key and prints the Solana address. Use it as `signer` in `proposal.json`. Supply `destination` as the pilot recipient's Solana address and `lamports` as a decimal string. Optional `rpcUrl` defaults to the public mainnet HTTPS endpoint. Generate `unsigned.txt` just before approval so its blockhash is still current. The proposal command reads the mainnet blockhash and writes an unsigned transaction. [Solana blockhash RPC](https://solana.com/docs/rpc/http/getlatestblockhash) · [AWS KMS public key API](https://docs.aws.amazon.com/kms/latest/APIReference/API_GetPublicKey.html)
+
+```powershell
+node .\kms-withdrawal-signer.mjs --address '<pilot-key-arn>'
+node .\prepare-withdrawal-proposal.mjs .\proposal.json .\unsigned.txt
+```
+
+On the approval host, verify the withdrawal against an independent record. The record JSON must supply `withdrawalId` as a unique lowercase identifier, `signer` and `destination` as Solana addresses, and `lamports` as a decimal string. The approval command compares all three transfer fields, issues a 45-second approval, and prints the receipt path. Keep a single protected receipt directory for the approval role. The withdrawal application must have no write access to the records or receipts and no access to the approval key. The command refuses a second approval for the same ID, even with a different blockhash. Reconcile the earlier request before issuing any replacement.
 
 ```powershell
 node .\withdrawal-approval.mjs .\unsigned.txt .\trusted-record.json .\approver-private.pem .\receipts

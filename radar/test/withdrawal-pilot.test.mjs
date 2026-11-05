@@ -11,7 +11,8 @@ import {GetPublicKeyCommand, SignCommand} from '@aws-sdk/client-kms';
 import {getBase58Decoder} from '@solana/codecs-strings';
 import {getCompiledTransactionMessageEncoder} from '@solana/transaction-messages';
 import {getTransactionDecoder, getTransactionEncoder} from '@solana/transactions';
-import {createKmsWithdrawalSigner} from '../kms-withdrawal-signer.mjs';
+import {createKmsWithdrawalSigner, getKmsWalletAddress} from '../kms-withdrawal-signer.mjs';
+import {inspectWithdrawal, prepareWithdrawalProposal} from '../withdrawal-guard.mjs';
 
 const run = promisify(execFile);
 const approvalTool = fileURLToPath(new URL('../withdrawal-approval.mjs', import.meta.url));
@@ -38,13 +39,12 @@ function proposal(blockhash = 12) {
   return Buffer.from(getTransactionEncoder().encode({messageBytes, signatures:{[signer]:null}})).toString('base64');
 }
 
-async function setupApprover(t, record = authorization) {
+async function setupApprover(t, record = authorization, transaction = proposal()) {
   const dir = await mkdtemp(join(tmpdir(), 'huntxr-withdrawal-'));
   t.after(() => rm(dir, {recursive:true, force:true}));
   const proposalFile = join(dir, 'unsigned.txt');
   const recordFile = join(dir, 'trusted-record.json');
   const keyFile = join(dir, 'approver-private.pem');
-  const transaction = proposal();
   await Promise.all([
     writeFile(proposalFile, transaction + '\r\n'),
     writeFile(recordFile, '\uFEFF' + JSON.stringify(record)),
@@ -81,11 +81,24 @@ function setupSigner(publicKey = wallet.publicKey, verdict = 'Benign') {
       return Response.json({status:'SUCCESS', result:{validation:{result_type:verdict}}});
     }
   };
-  return {calls, create:() => createKmsWithdrawalSigner(options)};
+  return {calls, kms:options.kms, create:() => createKmsWithdrawalSigner(options)};
 }
 
 test('The approval command hands off a receipt that the KMS-backed guard can sign', async t => {
-  const {approve, transaction} = await setupApprover(t);
+  const rpcCalls = [];
+  const {transaction, lastValidBlockHeight} = await prepareWithdrawalProposal({...authorization, fetchImpl:async (_url, init) => {
+    const {id, method, params} = JSON.parse(init.body);
+    rpcCalls.push(method);
+    if (method === 'getGenesisHash') return Response.json({id, result:'5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d'});
+    assert.equal(method, 'getLatestBlockhash');
+    assert.deepEqual(params, [{commitment:'confirmed'}]);
+    return Response.json({id, result:{value:{blockhash:base58.decode(Buffer.alloc(32,12)), lastValidBlockHeight:321}}});
+  }});
+  assert.deepEqual(rpcCalls, ['getGenesisHash', 'getLatestBlockhash']);
+  assert.equal(transaction, proposal());
+  assert.equal(lastValidBlockHeight, 321);
+  assert.equal(inspectWithdrawal(transaction).lamports, 40n);
+  const {approve} = await setupApprover(t, authorization, transaction);
   const {stdout} = await approve();
   const receipt = JSON.parse(await readFile(stdout.trim(), 'utf8'));
   assert.equal(receipt.withdrawalId, authorization.withdrawalId);
@@ -97,6 +110,26 @@ test('The approval command hands off a receipt that the KMS-backed guard can sig
   assert.deepEqual(final.messageBytes, decoder.decode(Buffer.from(transaction, 'base64')).messageBytes);
   assert.ok(verify(null, final.messageBytes, wallet.publicKey, final.signatures[signer]));
   assert.deepEqual(calls, ['GetPublicKey', 'getGenesisHash', 'simulateTransaction', 'signTransaction', 'Sign']);
+});
+
+test('Proposal preparation stops on a wrong cluster and rejects invalid amounts before RPC', async () => {
+  const calls = [];
+  const fetchImpl = async (_url, init) => {
+    const {id, method} = JSON.parse(init.body);
+    calls.push(method);
+    return Response.json({id, result:'devnet'});
+  };
+  await assert.rejects(prepareWithdrawalProposal({...authorization, lamports:'18446744073709551616', fetchImpl}), /amount limit/);
+  await assert.rejects(prepareWithdrawalProposal({...authorization, destination:signer, fetchImpl}), /distinct/);
+  assert.deepEqual(calls, []);
+  await assert.rejects(prepareWithdrawalProposal({...authorization, fetchImpl}), /mainnet blockhash/);
+  assert.deepEqual(calls, ['getGenesisHash']);
+});
+
+test('Wallet address lookup requires only the KMS public key operation', async () => {
+  const {calls, kms} = setupSigner();
+  assert.equal(await getKmsWalletAddress({keyArn, kms}), signer);
+  assert.deepEqual(calls, ['GetPublicKey']);
 });
 
 test('The approval command refuses a mismatch and issues only one receipt per record across processes', async t => {
