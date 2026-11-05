@@ -78,6 +78,27 @@ The backend deliberately excludes source/destination IP addresses, raw payloads 
 
 **Cloudflare boundary:** The current first sensor is local-file-based; it is **not deployed to Cloudflare**. A future authenticated telemetry uplink or managed container would be needed to securely stream sanitized Kali events into a Cloudflare-hosted customer dashboard.
 
+## Validate the first sensor on Kali or Ubuntu
+
+Run this on a Genyxis-owned or explicitly authorized Kali/Ubuntu host with Node.js 22 or newer, npm, and Suricata. Check prerequisites from the `radar` directory:
+
+    node --version
+    suricata -V
+    npm test
+
+If Suricata is missing, install the distribution package on the test host with `sudo apt update && sudo apt install suricata`. Then, in the same terminal:
+
+    sudo -v
+    npm run verify:suricata
+
+The check starts a short-lived Suricata capture of one randomly assigned UDP destination port on `127.0.0.1`. A harmless marker sent to that port triggers a dedicated passive rule. The script checks the real EVE record and the alert in Radar's HTTP snapshot. It checks for zero reported blocks, zero Solana observations, and the absence of raw IPs, ports, or packet payloads from the API event. Only the packet capture runs with elevated permissions. Radar listens on a temporary loopback port and the test runs without external RPC traffic.
+
+- **Pass:** Save the three console lines beginning with `PASS Hunter Radar live loopback` as evidence for roadmap issue #2. They include the Suricata and Node versions, time, and alert results.
+- **Fail before capture:** Check that `suricata -V` succeeds and that `sudo -v` ran in the same terminal. Use the Linux host or VM where packet capture is permitted.
+- **Fail during capture:** The script prints the paths of the local Suricata startup log and EVE file. Review startup errors first, then check whether EVE contains the probe signature. The EVE file includes raw loopback addresses and ports.
+
+For the separate mainnet check, start Radar normally with the public mainnet endpoints in the setup section. Open `http://127.0.0.1:4190/api/health` and confirm `rpcOk: true`, an integer `currentSlot`, `subscribed: true`, and an increasing `counters.observed`. Stop Radar with Ctrl+C. Keep this result separate from the loopback evidence. A passing loopback proves local capture and ingestion. Mainnet availability and customer-network coverage require their own evidence.
+
 ## Verification
 
 Run the offline deterministic logic tests with:
