@@ -72,6 +72,29 @@ const signedTransaction = await signWithdrawal({transaction, approval});
 
 `transaction` is a canonical base64 Solana wire transaction with a zeroed signature slot. The guard permits a single native SOL transfer in legacy or v0 format, with a recent blockhash, one signer, and no lookup tables or extra instructions. The adapter returns a raw 64-byte Ed25519 signature. The guard verifies it against the original message and returns a base64 signed transaction for the caller to submit. This is a per-transfer policy for designated wallets and treasury destinations. Token withdrawals, swaps, v1 transactions, durable nonces, and other chains are outside its scope. The dashboard remains a separate read-only service. Live signer and provider acceptance tests are pending.
 
+### Approval and signer pilot
+
+From `radar`, run the handoff test using disposable keys and local provider fixtures. It covers the approval command, receipt validation, the KMS request, and verification of the returned Solana signature.
+
+```powershell
+npm.cmd ci
+node --test .\test\withdrawal-pilot.test.mjs
+```
+
+For the live pilot, the withdrawal application supplies `unsigned.txt` with the base64 transaction. On the approval host, verify the withdrawal against an independent record. The record JSON must supply `withdrawalId` as a unique lowercase identifier, `signer` and `destination` as Solana addresses, and `lamports` as a decimal string. The approval command compares all three transfer fields, issues a 45-second approval, and prints the receipt path. Keep a single protected receipt directory for the approval role. The withdrawal application must have no write access to the records or receipts and no access to the approval key. The command refuses a second approval for the same ID, even with a different blockhash. Reconcile the earlier request before issuing any replacement.
+
+```powershell
+node .\withdrawal-approval.mjs .\unsigned.txt .\trusted-record.json .\approver-private.pem .\receipts
+```
+
+On the isolated signer host, configure `signer-config.json` with `keyArn`, `signerAddress`, `allowedDestinations` (an array), `maxLamports` (a decimal string), and `approverPublicKeyFile` (relative to the config file). Optional `rpcUrl` defaults to Solana's public mainnet HTTPS endpoint. Use a pilot Ed25519 `SIGN_VERIFY` KMS key with an immutable key ARN and pass `BLOCKAID_CLIENT_API_KEY` through the signer's secret store. Grant the signer role `kms:GetPublicKey` and `kms:Sign` on that key. Keep these permissions and role assumption outside the withdrawal application's and deployment role's reach. [AWS KMS signing API](https://docs.aws.amazon.com/kms/latest/APIReference/API_Sign.html)
+
+Pass the printed receipt file and original proposal to the signer promptly. For the first live acceptance run, `--discard` verifies the KMS signature and releases no signed transaction. Use `signed.txt` in its place only when an integrating application needs the verified signed transaction. The signer writes a new file and does not broadcast it. Keep key files, configuration secrets, receipts, and signed transactions in access-controlled directories outside the repository.
+
+```powershell
+node .\kms-withdrawal-signer.mjs .\signer-config.json .\unsigned.txt .\approval-receipt.json --discard
+```
+
 ## Current limits
 
 1. The activity timeline aggregates the current minute and the previous 14 minutes independently of event details (500 in memory, 100 sent to the dashboard). The last 65,536 distinct signatures are tracked for deduplication during the session. Stream gaps are not backfilled, and confirmed transactions can still be reorganized.

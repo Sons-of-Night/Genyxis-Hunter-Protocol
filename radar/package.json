@@ -12,6 +12,7 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
+    "@aws-sdk/client-kms": "3.1162.0",
     "@solana/codecs-strings": "8.6.0",
     "@solana/transaction-messages": "8.6.0",
     "@solana/transactions": "8.6.0"
