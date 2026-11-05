@@ -3,12 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Solana mainnet security telemetry and pre-sign denylist policy service",
+  "description": "Solana mainnet security telemetry and protected withdrawal signing",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
     "start": "node server.mjs",
     "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-kms": "3.1162.0",
+    "@solana/codecs-strings": "8.6.0",
+    "@solana/transaction-messages": "8.6.0",
+    "@solana/transactions": "8.6.0"
   }
 }

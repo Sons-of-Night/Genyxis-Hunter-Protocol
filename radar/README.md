@@ -19,6 +19,7 @@ Node.js 22 or later required. From the repository root:
 
     cd radar
     node --version
+    npm ci
     node --test test/*.test.mjs
 
     export HUNTER_RADAR_RPC_HTTP='https://api.mainnet.solana.com'
@@ -45,12 +46,68 @@ Returns decision=deny only for an address on the configured denylist; otherwise 
 
 Send up to 64 addresses in each array and keep the UTF-8 JSON body within 8 KiB. Requests larger than 8 KiB receive HTTP 413. Use a loopback hostname or address in the request URL.
 
+## Protected SOL withdrawal signing
+
+The withdrawal guard runs inside a separate, trusted signer. It addresses the signing-service bypass Binance described after the October 29, 2026 theft. A withdrawal container can propose a transfer, but the signer requires an independent approval even when the transfer looks ordinary and its destination has no known threat history. [Binance preliminary incident findings](https://www.binance.com/en/square/post/384328127385979)
+
+1. Give the approval service a separate Ed25519 key and identity. Independently verify the withdrawal against your authorization records. Use `inspectWithdrawal(transaction)` to review the signer, destination, and amount in lamports before approving. Sign `withdrawalApprovalMessage(transaction, expiresAt)` with the approval key. Supply `{expiresAt, signature}` to the signer, with expiry in Unix milliseconds up to 60 seconds ahead and the Ed25519 signature in base64.
+2. Keep the withdrawal key and its KMS permissions outside the withdrawal application, its CI/CD role, and the Radar dashboard. Configure the signer with the approval public key, a destination allowlist, and a per-transfer cap. Make the guard the only application path to the withdrawal key. Use distinct, separately managed access for approval and signer policy changes.
+3. Configure a trusted Solana HTTPS RPC and a Blockaid API key in the isolated service. Each approved request checks the RPC's mainnet identity, simulates the exact unsigned transaction, and requests a new Blockaid verdict. An outage, failed simulation, warning, or missing verdict withholds the signature. Both providers receive the unsigned transaction. Blockaid also receives the signer’s public address. [Solana simulation API](https://solana.com/docs/rpc/http/simulatetransaction) · [Blockaid Solana API](https://github.com/blockaid-official/blockaid-client-node/blob/main/src/resources/solana/message.ts)
+
+```js
+import {createProtectedWithdrawalSigner} from './withdrawal-guard.mjs';
+
+const signWithdrawal = createProtectedWithdrawalSigner({
+  signerAddress: config.walletAddress,
+  approverPublicKey: config.approverPublicKeyPem,
+  allowedDestinations: config.treasuryAddresses,
+  maxLamports: BigInt(config.maxWithdrawalLamports),
+  blockaidApiKey: process.env.BLOCKAID_CLIENT_API_KEY,
+  rpcUrl: config.mainnetRpcUrl,
+  signMessage: (messageBytes, {signal}) => isolatedSigner.signEd25519(messageBytes, {signal})
+});
+
+const signedTransaction = await signWithdrawal({transaction, approval});
+```
+
+`transaction` is a canonical base64 Solana wire transaction with a zeroed signature slot. The guard permits a single native SOL transfer in legacy or v0 format, with a recent blockhash, one signer, and no lookup tables or extra instructions. The adapter returns a raw 64-byte Ed25519 signature. The guard verifies it against the original message and returns a base64 signed transaction for the caller to submit. This is a per-transfer policy for designated wallets and treasury destinations. Token withdrawals, swaps, v1 transactions, durable nonces, and other chains are outside its scope. The dashboard remains a separate read-only service. Live signer and provider acceptance tests are pending.
+
+### Approval and signer pilot
+
+From `radar`, run the handoff test using disposable keys and local provider fixtures. It covers the approval command, receipt validation, the KMS request, and verification of the returned Solana signature.
+
+```powershell
+npm.cmd ci
+node --test .\test\withdrawal-pilot.test.mjs
+```
+
+For the live pilot, run `--address` with the pilot key's full KMS ARN. This reads the public key and prints the Solana address. Use it as `signer` in `proposal.json`. Supply `destination` as the pilot recipient's Solana address and `lamports` as a decimal string. Optional `rpcUrl` defaults to the public mainnet HTTPS endpoint. Generate `unsigned.txt` just before approval so its blockhash is still current. The proposal command reads the mainnet blockhash and writes an unsigned transaction. [Solana blockhash RPC](https://solana.com/docs/rpc/http/getlatestblockhash) · [AWS KMS public key API](https://docs.aws.amazon.com/kms/latest/APIReference/API_GetPublicKey.html)
+
+```powershell
+node .\kms-withdrawal-signer.mjs --address '<pilot-key-arn>'
+node .\prepare-withdrawal-proposal.mjs .\proposal.json .\unsigned.txt
+```
+
+On the approval host, verify the withdrawal against an independent record. The record JSON must supply `withdrawalId` as a unique lowercase identifier, `signer` and `destination` as Solana addresses, and `lamports` as a decimal string. The approval command compares all three transfer fields, issues a 45-second approval, and prints the receipt path. Keep a single protected receipt directory for the approval role. The withdrawal application must have no write access to the records or receipts and no access to the approval key. The command refuses a second approval for the same ID, even with a different blockhash. Reconcile the earlier request before issuing any replacement.
+
+```powershell
+node .\withdrawal-approval.mjs .\unsigned.txt .\trusted-record.json .\approver-private.pem .\receipts
+```
+
+On the isolated signer host, configure `signer-config.json` with `keyArn`, `signerAddress`, `allowedDestinations` (an array), `maxLamports` (a decimal string), and `approverPublicKeyFile` (relative to the config file). Optional `rpcUrl` defaults to Solana's public mainnet HTTPS endpoint. Use a pilot Ed25519 `SIGN_VERIFY` KMS key with an immutable key ARN and pass `BLOCKAID_CLIENT_API_KEY` through the signer's secret store. Grant the signer role `kms:GetPublicKey` and `kms:Sign` on that key. Keep these permissions and role assumption outside the withdrawal application's and deployment role's reach. [AWS KMS signing API](https://docs.aws.amazon.com/kms/latest/APIReference/API_Sign.html)
+
+Pass the printed receipt file and original proposal to the signer promptly. For the first live acceptance run, `--discard` verifies the KMS signature and releases no signed transaction. Use `signed.txt` in its place only when an integrating application needs the verified signed transaction. The signer writes a new file and does not broadcast it. Keep key files, configuration secrets, receipts, and signed transactions in access-controlled directories outside the repository.
+
+```powershell
+node .\kms-withdrawal-signer.mjs .\signer-config.json .\unsigned.txt .\approval-receipt.json --discard
+```
+
 ## Current limits
 
 1. The activity timeline aggregates the current minute and the previous 14 minutes independently of event details (500 in memory, 100 sent to the dashboard). The last 65,536 distinct signatures are tracked for deduplication during the session. Stream gaps are not backfilled, and confirmed transactions can still be reorganized.
 2. An all-logs subscription may not provide complete reliable network coverage due to provider limits. Production requires durable indexing, Yellowstone/Geyser streaming, missed-slot backfill and coverage metrics.
 3. No validated classification of malicious AI agents, drainers, exploits, safe contracts or infected wallets. Simple failed transactions are not attacks.
-4. Operator-configured denylist only; policy decisions are recommendations and not proof that an on-chain attack was blocked.
+4. The dashboard’s address policy remains advisory. Enforcement applies when an isolated wallet signer integrates the protected SOL withdrawal guard.
 5. Real security productization requires verified threat intelligence, decoded transactions and balances, pre-sign simulation, authenticated multi-tenant services, incident evidence, secure alerts, independent review and wallet/dApp enforcement integrations.
 6. Watch addresses may be sensitive. Keep seed phrases, private keys, lab DNA data and other personal secrets off the dashboard and RPC provider.
 
