@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {request as httpRequest} from 'node:http';
 import {assessPolicy, normalizeObservation, buckets, createRadar, createServer} from '../server.mjs';
 
 const A='11111111111111111111111111111111';
@@ -94,4 +95,43 @@ test('Real input pipeline deduplicates mainnet stream and targeted-watch events'
       assert.equal((await fetch(base+'/missing')).status,404);
     } finally {await new Promise(resolve=>server.close(resolve));}
   }finally{radar.stop();}
+});
+
+test('Radar HTTP boundary rejects rebinding, cross-site access and invalid JSON requests', async () => {
+  const radar = {snapshot: () => ({status:'local'}), assess: () => ({decision:'no_match'})};
+  const server = createServer(radar);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  function requestStatus({path='/api/snapshot', method='GET', headers={}, body}={}) {
+    return new Promise((resolve, reject) => {
+      const request = httpRequest({hostname:'127.0.0.1', port, path, method, headers}, response => {
+        response.resume();
+        response.on('end', () => resolve(response.statusCode));
+        response.on('error', reject);
+      });
+      request.on('error', reject);
+      request.end(body);
+    });
+  }
+  try {
+    assert.equal(await requestStatus(), 200);
+    assert.equal(await requestStatus({headers:{Host:'localhost:'+port}}), 200);
+    assert.equal(await requestStatus({headers:{Host:'attacker.example:'+port}}), 403);
+    assert.equal(await requestStatus({headers:{Host:'127.0.0.1:1'}}), 403);
+    assert.equal(await requestStatus({headers:{Origin:'http://attacker.example'}}), 403);
+    assert.equal(await requestStatus({headers:{'Sec-Fetch-Site':'cross-site'}}), 403);
+    const body = JSON.stringify({programIds:[],accounts:[]});
+    assert.equal(await requestStatus({
+      path:'/api/assess', method:'POST', body, headers:{'Content-Type':'application/json'}
+    }), 200);
+    assert.equal(await requestStatus({
+      path:'/api/assess', method:'POST', body, headers:{'Content-Type':'text/plain'}
+    }), 415);
+    assert.equal(await requestStatus({
+      path:'/api/assess', method:'POST', body:'x'.repeat(4097),
+      headers:{'Content-Type':'application/json'}
+    }), 413);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
 });

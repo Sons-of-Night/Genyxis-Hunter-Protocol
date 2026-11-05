@@ -15,6 +15,21 @@ export const ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const SIGNATURE = /^[1-9A-HJ-NP-Za-km-z]{64,100}$/;
 const HISTORY_LIMIT = 500;
 const MAX_WATCH = 12;
+const MAX_ASSESS_BYTES = 4096;
+const LOCAL_HOST = /^(?:localhost|127\.0\.0\.1)(?::([1-9][0-9]{0,4}))?$/i;
+
+// Reject DNS-rebinding hosts and cross-site browser requests even on loopback.
+// This is a boundary guard, not a substitute for authentication of local clients.
+function trustedLocalRequest(req) {
+  const host = req.headers.host;
+  if (typeof host !== 'string') return false;
+  const match = LOCAL_HOST.exec(host);
+  if (!match || (match[1] && Number(match[1]) !== req.socket.localPort)) return false;
+  const origin = req.headers.origin;
+  if (origin !== undefined && origin !== 'http://' + host.toLowerCase()) return false;
+  const site = req.headers['sec-fetch-site'];
+  return site === undefined || site === 'same-origin' || site === 'none';
+}
 
 function addresses(text, max = 64) {
   const items = String(text || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -229,28 +244,43 @@ export function createRadar({
 }
 export function createServer(radar) {
   const files = {'/':'index.html','/index.html':'index.html','/app.js':'app.js','/styles.css':'styles.css'};
-  return http.createServer(async (req,res) => {
+  const server = http.createServer(async (req,res) => {
     const security = {
       'Cache-Control':'no-store', 'X-Content-Type-Options':'nosniff',
       'X-Frame-Options':'DENY','Referrer-Policy':'no-referrer',
+      'Cross-Origin-Resource-Policy':'same-origin',
+      'Permissions-Policy':'camera=(), microphone=(), geolocation=()',
       'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
     };
     for (const [k,v] of Object.entries(security)) res.setHeader(k,v);
+    if (!trustedLocalRequest(req)) {
+      res.writeHead(403); res.end('Local origin required'); return;
+    }
     const url = new URL(req.url,'http://localhost');
     if (req.method === 'GET' && (url.pathname === '/api/snapshot' || url.pathname === '/api/health')) {
       res.writeHead(200,{'Content-Type':'application/json; charset=utf-8'});
       res.end(JSON.stringify(radar.snapshot())); return;
     }
     if (req.method === 'POST' && url.pathname === '/api/assess') {
-      if (req.headers.origin && !/^http:\/\/(127\.0\.0\.1|localhost):[0-9]+$/.test(req.headers.origin)) {
-        res.writeHead(403);res.end('Origin denied');return;
+      if (!/^application\/json(?:\s*;\s*charset\s*=\s*utf-8)?$/i.test(req.headers['content-type'] || '')) {
+        res.writeHead(415); res.end('Expected application/json'); return;
       }
-      let data = '', rejected = false;
-      for await(const chunk of req) {
-        data += chunk.toString();
-        if (data.length > 4096) {rejected=true;break;}
+      if (Number(req.headers['content-length'] || 0) > MAX_ASSESS_BYTES) {
+        res.writeHead(413); res.end('Request too large'); return;
       }
-      if (rejected) {res.writeHead(413);res.end('Request too large');return;}
+      let chunks = [], bytes = 0, rejected = false;
+      try {
+        for await (const chunk of req) {
+          bytes += chunk.length;
+          if (bytes > MAX_ASSESS_BYTES) { rejected = true; chunks = []; }
+          else if (!rejected) chunks.push(chunk);
+        }
+      } catch {
+        if (!res.destroyed) { res.writeHead(400); res.end('Invalid request body'); }
+        return;
+      }
+      if (rejected) { res.writeHead(413); res.end('Request too large'); return; }
+      const data = Buffer.concat(chunks).toString('utf8');
       try {
         const result = radar.assess(JSON.parse(data));
         res.writeHead(200,{'Content-Type':'application/json; charset=utf-8'});
@@ -270,6 +300,11 @@ export function createServer(radar) {
       res.writeHead(200,{'Content-Type':mime+'; charset=utf-8'});res.end(body);
     } catch {res.writeHead(500);res.end('Dashboard asset missing');}
   });
+  server.requestTimeout = 10000;
+  server.headersTimeout = 10000;
+  server.keepAliveTimeout = 5000;
+  server.maxHeadersCount = 50;
+  return server;
 }
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const radar = createRadar();

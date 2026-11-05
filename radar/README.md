@@ -85,3 +85,12 @@ Run the offline deterministic logic tests with:
     node --test test/*.test.mjs
 
 The tests use synthetic fixtures to validate the parser and API. The running product never reads test fixtures or displays mock alerts.
+
+## Local HTTP boundary hardening (proposed)
+
+Huntxr Radar's local API is bound to `127.0.0.1`. The Phase 1 hardening branch also rejects non-local/mismatched `Host` headers (DNS-rebinding defense), cross-origin and cross-site browser requests, and non-JSON policy submissions. Policy request bodies are capped at 4 KiB by byte count; HTTP headers and request lifetimes have bounded server settings. The dashboard continues to work from `http://127.0.0.1:4190` or `http://localhost:4190` on the machine running Radar.
+
+Run `npm test` in `radar/` after pulling the reviewed branch. The HTTP boundary regression tests exercise normal local access, rejected foreign hosts, rejected cross-site contexts, JSON content-type requirements, and the body cap. They are **not** a substitute for a pen test or live service verification.
+
+**Remaining limits:** loopback access is not user authentication. Other local processes may still reach the API, and the policy endpoint is not suitable for remote or multi-tenant use. Do **not** forward the Radar port, add a public reverse proxy, or expose it via Cloudflare Tunnel until authenticated access, tenant isolation, and authorization are implemented and tested. Cloudflare/WAF rules alone cannot provide local API authorization. The network feed and sensor data remain untrusted, best-effort security observations.
+
