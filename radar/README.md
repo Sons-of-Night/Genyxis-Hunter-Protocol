@@ -43,9 +43,11 @@ Content-Type: application/json
 
 Returns decision=deny only for an address on the configured denylist; otherwise decision=no_match. No_match does NOT prove that the transaction is safe. This endpoint does not simulate, sign, submit or stop a transaction. A customer's wallet or dApp must integrate and honor its decision to provide preventive action. Do not directly expose this unauthenticated loopback-only prototype to the internet.
 
+Send up to 64 addresses in each array and keep the UTF-8 JSON body within 8 KiB. Requests larger than 8 KiB receive HTTP 413. Use a loopback hostname or address in the request URL.
+
 ## Current limits
 
-1. Session-only, bounded activity history (500 events in memory, last 100 sent to the dashboard). Stream gaps are not backfilled. Confirmed commitment can later be reorganized; no finalized reconciliation yet.
+1. The activity timeline aggregates the current minute and the previous 14 minutes independently of event details (500 in memory, 100 sent to the dashboard). The last 65,536 distinct signatures are tracked for deduplication during the session. Stream gaps are not backfilled, and confirmed transactions can still be reorganized.
 2. An all-logs subscription may not provide complete reliable network coverage due to provider limits. Production requires durable indexing, Yellowstone/Geyser streaming, missed-slot backfill and coverage metrics.
 3. No validated classification of malicious AI agents, drainers, exploits, safe contracts or infected wallets. Simple failed transactions are not attacks.
 4. Operator-configured denylist only; policy decisions are recommendations and not proof that an on-chain attack was blocked.
