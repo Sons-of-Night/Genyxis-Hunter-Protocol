@@ -11,6 +11,7 @@ Hunter is a Genyxis initiative to help Solana developers and operators **observe
 | Component | What it does | Current status |
 | --- | --- | --- |
 | **Hunter Radar** (`radar/`) | Reads Solana mainnet transaction logs, displays live activity and slot health, offers a local pre-sign policy API, and ingests Suricata EVE alerts | Implemented development foundation; target-host and live-feed verification still needed |
+| **Huntxr withdrawal guard** (`radar/withdrawal-guard.mjs`) | Requires independent approval, a permitted destination and amount, mainnet simulation, and a fresh threat verdict before signing a protected native SOL withdrawal | Signer-side library with automated tests. Live integration requires an isolated signing adapter and threat-screening credentials. |
 | **Kali / Suricata sensor** (`radar/kali/`) | Reads newly appended EVE JSON intrusion alerts from a locally authorized sensor and presents sanitized alert metadata | Integration implemented; real loopback capture verification is in [draft PR #3](https://github.com/Sons-of-Night/Genyxis-Hunter-Protocol/pull/3) |
 | **Hunter Guard** (`program/`) | Anchor/Solana program prototype that requires issuer authorization and records one claim receipt per campaign and claimant | Isolated synthetic-rewards proof of concept; not the Radar product |
 | **Offline / chain labs** (`lab/`, `chain-lab/`) | Test authorization, signing, expiry and replay-resistance assumptions | Fixtures and test harness supplied; native Solana SBF/LiteSVM execution must be verified on a configured host |
@@ -19,13 +20,14 @@ These tracks are related, but **Hunter Radar runs independently of the synthetic
 
 ## Hunter Radar — run locally
 
-**Requirements:** Linux (Ubuntu, Kali, or WSL) and **Node.js 22+**. Radar uses Node's built-in runtime APIs; no third-party npm package installation is required for the current server.
+**Requirements:** Linux (Ubuntu, Kali, or WSL) and **Node.js 22+**. Install the locked Solana SDK dependencies to run the withdrawal guard and its tests.
 
 ```bash
 git clone https://github.com/Sons-of-Night/Genyxis-Hunter-Protocol.git
 cd Genyxis-Hunter-Protocol/radar
 
 node --version
+npm ci
 npm test
 
 export HUNTER_RADAR_RPC_HTTP='https://api.mainnet.solana.com'
@@ -62,7 +64,7 @@ curl -sS -X POST http://127.0.0.1:4190/api/assess \
 
 - `decision: "deny"` means an address matched the **operator's configured denylist**.
 - `decision: "no_match"` means there was no configured match. **It does not mean safe.**
-- Hunter currently **does not simulate, sign, broadcast, reverse or globally block** Solana transactions. A protected application must explicitly integrate and enforce its own decision.
+- For enforcement at the signing boundary, integrate the [Huntxr withdrawal guard](radar/README.md#protected-sol-withdrawal-signing) in the signing service.
 
 Do not expose the unauthenticated local API directly to the internet.
 
