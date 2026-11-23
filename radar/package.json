@@ -9,7 +9,8 @@
   },
   "scripts": {
     "start": "node server.mjs",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "verify:suricata": "node scripts/verify-suricata-loopback.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-kms": "3.1162.0",
