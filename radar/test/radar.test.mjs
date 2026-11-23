@@ -148,13 +148,13 @@ test('Policy API survives an interrupted upload and handles its full supported b
   try {
     await once(client,'connect');
     const incoming = once(server,'request');
-    client.write(`POST /api/assess HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nContent-Length: 100\r\n\r\n{`);
+    client.write(`POST /api/assess HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{`);
     const [req] = await incoming;
     const aborted = once(req,'aborted');
     client.destroy();
     await aborted;
 
-    const post = body=>fetch(endpoint,{method:'POST',body});
+    const post = body=>fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body});
     assert.equal((await post('{')).status,400);
     // This is fewer than 8192 characters, but more than 8192 UTF-8 bytes.
     assert.equal((await post(JSON.stringify('é'.repeat(4096)))).status,413);
@@ -188,4 +188,29 @@ test('Loopback API rejects a non-local Host and survives an invalid request targ
     assert.equal(await status('http://[',`127.0.0.1:${port}`),400);
     assert.equal(await status('/api/snapshot',`localhost:${port}`),200);
   } finally { await new Promise(resolve=>server.close(resolve)); }
+});
+
+test('Local HTTP boundary rejects rebinding, cross-site access and non-JSON policy requests', async()=>{
+  const radar = {snapshot:()=>({status:'local'}),assess:()=>({decision:'no_match'})};
+  const server=createServer(radar);
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const port=server.address().port;
+  const status=({path='/api/snapshot',method='GET',headers={},body}={})=>new Promise((resolve,reject)=>{
+    const req=request({hostname:'127.0.0.1',port,path,method,headers},res=>{
+      res.resume();res.on('end',()=>resolve(res.statusCode));res.on('error',reject);
+    });
+    req.on('error',reject);req.end(body);
+  });
+  try {
+    assert.equal(await status(),200);
+    assert.equal(await status({headers:{Host:'localhost:'+port}}),200);
+    assert.equal(await status({headers:{Host:'attacker.example:'+port}}),403);
+    assert.equal(await status({headers:{Host:'127.0.0.1:1'}}),403);
+    assert.equal(await status({headers:{Origin:'http://attacker.example'}}),403);
+    assert.equal(await status({headers:{'Sec-Fetch-Site':'cross-site'}}),403);
+    const body=JSON.stringify({programIds:[],accounts:[]});
+    assert.equal(await status({path:'/api/assess',method:'POST',body,headers:{'Content-Type':'application/json'}}),200);
+    assert.equal(await status({path:'/api/assess',method:'POST',body,headers:{'Content-Type':'text/plain'}}),415);
+    assert.equal(await status({path:'/api/assess',method:'POST',body:'x'.repeat(8193),headers:{'Content-Type':'application/json'}}),413);
+  } finally {await new Promise(resolve=>server.close(resolve));}
 });

@@ -165,3 +165,9 @@ Run the offline deterministic logic tests with:
     node --test test/*.test.mjs
 
 The tests use synthetic fixtures to validate the parser and API. The running product never reads test fixtures or displays mock alerts.
+
+## Local HTTP boundary hardening
+
+The Radar HTTP listener remains loopback-only. A Host matching the actual local listener, same-origin browser requests, and JSON policy submissions are required. It rejects DNS-rebinding hosts, cross-site requests and mismatched ports, and adds bounded HTTP request/header lifetimes and restrictive browser headers. The policy body limit remains **8 KiB** (not 4 KiB) to preserve the documented 64+64 address contract and interrupted-upload handling from PR #4.
+
+The boundary has deterministic regression tests in `npm test`; loopback controls are **not** authentication. Do not forward this port or expose it via a public reverse proxy or Cloudflare Tunnel without a separate authenticated, authorized service boundary. Live host and network sensor verification are still required.

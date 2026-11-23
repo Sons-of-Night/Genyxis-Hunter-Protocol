@@ -18,7 +18,18 @@ const SIGNATURE_HISTORY_LIMIT = 65_536;
 const TIMELINE_MINUTES = 15;
 const MINUTE_MS = 60_000;
 const ASSESS_BODY_LIMIT = 8_192;
-const LOCAL_HOST = /^(?:127\.0\.0\.1|localhost|\[::1\])(?::[0-9]{1,5})?$/i;
+const LOCAL_HOST = /^(?:localhost|127\.0\.0\.1)(?::([1-9][0-9]{0,4}))?$/i;
+
+function trustedLocalRequest(req) {
+  const host = req.headers.host;
+  if (typeof host !== 'string') return false;
+  const match = LOCAL_HOST.exec(host);
+  if (!match || (match[1] && Number(match[1]) !== req.socket.localPort)) return false;
+  const origin = req.headers.origin;
+  if (origin !== undefined && origin.toLowerCase() !== 'http://' + host.toLowerCase()) return false;
+  const site = req.headers['sec-fetch-site'];
+  return site === undefined || site === 'same-origin' || site === 'none';
+}
 const MAX_WATCH = 12;
 
 function addresses(text, max = 64) {
@@ -253,16 +264,18 @@ export function createRadar({
 }
 export function createServer(radar) {
   const files = {'/':'index.html','/index.html':'index.html','/app.js':'app.js','/styles.css':'styles.css'};
-  return http.createServer(async (req,res) => {
+  const server = http.createServer(async (req,res) => {
     const security = {
       'Cache-Control':'no-store', 'X-Content-Type-Options':'nosniff',
       'X-Frame-Options':'DENY','Referrer-Policy':'no-referrer',
+      'Cross-Origin-Resource-Policy':'same-origin',
+      'Permissions-Policy':'camera=(), microphone=(), geolocation=()',
       'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
     };
     for (const [k,v] of Object.entries(security)) res.setHeader(k,v);
     // A loopback listener can still receive a browser request with a rebound hostname.
-    if (!LOCAL_HOST.test(req.headers.host || '')) {
-      res.writeHead(403);res.end('Host denied');return;
+    if (!trustedLocalRequest(req)) {
+      res.writeHead(403);res.end('Local origin required');return;
     }
     let url;
     try { url = new URL(req.url,'http://localhost'); }
@@ -272,8 +285,8 @@ export function createServer(radar) {
       res.end(JSON.stringify(radar.snapshot())); return;
     }
     if (req.method === 'POST' && url.pathname === '/api/assess') {
-      if (req.headers.origin && !/^http:\/\/(127\.0\.0\.1|localhost):[0-9]+$/.test(req.headers.origin)) {
-        res.writeHead(403);res.end('Origin denied');return;
+      if (!/^application\/json(?:\s*;\s*charset\s*=\s*utf-8)?$/i.test(req.headers['content-type'] || '')) {
+        res.writeHead(415);res.end('Expected application/json');return;
       }
       try {
         const chunks = [];
@@ -307,6 +320,11 @@ export function createServer(radar) {
       res.writeHead(200,{'Content-Type':mime+'; charset=utf-8'});res.end(body);
     } catch {res.writeHead(500);res.end('Dashboard asset missing');}
   });
+  server.requestTimeout = 10000;
+  server.headersTimeout = 10000;
+  server.keepAliveTimeout = 5000;
+  server.maxHeadersCount = 50;
+  return server;
 }
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const radar = createRadar();
