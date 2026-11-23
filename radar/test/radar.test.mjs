@@ -148,7 +148,7 @@ test('Policy API survives an interrupted upload and handles its full supported b
   try {
     await once(client,'connect');
     const incoming = once(server,'request');
-    client.write(`POST /api/assess HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nContent-Length: 100\r\n\r\n{`);
+    client.write(`POST /api/assess HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{`);
     const [req] = await incoming;
     const aborted = once(req,'aborted');
     client.destroy();
