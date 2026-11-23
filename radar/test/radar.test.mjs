@@ -1,21 +1,31 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {request as httpRequest} from 'node:http';
-import {assessPolicy, normalizeObservation, buckets, createRadar, createServer} from '../server.mjs';
+import {once} from 'node:events';
+import {request} from 'node:http';
+import {connect} from 'node:net';
+import {assessPolicy, normalizeObservation, createRadar, createServer} from '../server.mjs';
 
 const A='11111111111111111111111111111111';
 const B='TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
 const SIG='5'.repeat(88);
 
-function notification(sub=4, err=null) {
+function notification(sub=4, err=null, signature=SIG) {
   return {method:'logsNotification',params:{
     subscription:sub,
     result:{context:{slot:30001},value:{
-      signature:SIG,err,
+      signature,err,
       logs:['Program '+A+' invoke [1]','Program '+A+' success']
     }}
   }};
 }
+
+class FakeSocket extends EventTarget {
+  sent = [];
+  emit(type, data) { this.dispatchEvent(new MessageEvent(type, {data:JSON.stringify(data)})); }
+  send(value) { this.sent.push(JSON.parse(value)); }
+  close() {}
+}
+
 test('Policy assessment only denies actual configured matches and never claims simulation',()=>{
   const deny=new Set([A]);
   assert.equal(assessPolicy([A],[],deny).decision,'deny');
@@ -39,27 +49,56 @@ test('Logs are classified as observations rather than assumed threats',()=>{
   assert.deepEqual(match.policyMatches,[A]);
   assert.equal(match.finding,'Configured policy match');
   assert.equal(normalizeObservation({params:{result:{value:{signature:'bad',logs:[]}}}},null,new Set()),null);
+  assert.equal(normalizeObservation(notification(4,null,[SIG]),null,new Set()),null);
 });
-test('History buckets contain only provided events',()=>{
-  const now=1700000000000;
-  const e=normalizeObservation(notification(),null,new Set(),now);
-  const chart=buckets([e],now);
-  assert.equal(chart.length,15);
-  assert.equal(chart.at(-1).observed,1);
-  assert.equal(chart.reduce((n,x)=>n+x.observed,0),1);
+test('Timeline retains counts and deduplicates watch notifications after event details expire',()=>{
+  let time = 60_000 * 28_333_333;
+  const socket = new FakeSocket();
+  const radar = createRadar({
+    env:{HUNTER_RADAR_WATCH_ADDRESSES:A,HUNTER_RADAR_DENY_ADDRESSES:A},
+    webSocketFactory:()=>socket,
+    fetchImpl:async()=>new Response(null,{status:503}),
+    now:()=>time
+  });
+  radar.start();
+  try {
+    socket.emit('open');
+    socket.emit('message',{id:1,result:4});
+    socket.emit('message',{id:2,result:5});
+    socket.emit('message',notification());
+    time += 60_000;
+    const alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+    for (let i = 0; i < 600; i++) {
+      const signature = '6'.repeat(86) + alphabet[Math.floor(i / alphabet.length)] + alphabet[i % alphabet.length];
+      socket.emit('message',notification(4, i % 2 ? null : 'AccountNotFound', signature));
+    }
+    assert.deepEqual(radar.snapshot().buckets.slice(-2),[
+      {minute:-1,observed:1,failed:0,policy:1},
+      {minute:0,observed:600,failed:300,policy:600}
+    ]);
+    socket.emit('message',notification(5));
+    socket.emit('message',notification(5));
+
+    const state = radar.snapshot();
+    assert.equal(state.events.length,100);
+    assert.ok(!state.events.some(event=>event.signature===SIG));
+    assert.equal(state.counters.observed,601);
+    assert.equal(state.counters.watchObserved,1);
+    assert.equal(state.buckets.length,15);
+    assert.equal(state.buckets.at(-1).observed,600);
+    time += 14 * 60_000;
+    assert.equal(radar.snapshot().buckets[0].observed,600);
+    time += 60_000;
+    assert.ok(radar.snapshot().buckets.every(bucket=>bucket.observed===0));
+    socket.emit('message',notification(4,null,'7'.repeat(88)));
+    assert.deepEqual(radar.snapshot().buckets.at(-1),{minute:0,observed:1,failed:0,policy:1});
+  } finally { radar.stop(); }
 });
 test('Real input pipeline deduplicates mainnet stream and targeted-watch events',async()=>{
-  let socket;
-  class FakeSocket{
-    constructor(){this.handlers={};this.sent=[];socket=this;}
-    addEventListener(type,handler){(this.handlers[type]??=[]).push(handler);}
-    emit(type,data){for(const h of this.handlers[type]||[])h({data:JSON.stringify(data)});}
-    send(value){this.sent.push(JSON.parse(value));}
-    close(){/* no messages after shutdown */}
-  }
+  const socket = new FakeSocket();
   const radar=createRadar({
     env:{HUNTER_RADAR_RPC_HTTP:'https://api.mainnet.solana.com',HUNTER_RADAR_WATCH_ADDRESSES:A,HUNTER_RADAR_DENY_ADDRESSES:B},
-    webSocketFactory:()=>new FakeSocket(),
+    webSocketFactory:()=>socket,
     fetchImpl:async()=>({ok:true,json:async()=>({result:35000})}),
     now:()=>1700000000000
   });
@@ -71,6 +110,7 @@ test('Real input pipeline deduplicates mainnet stream and targeted-watch events'
     assert.deepEqual(socket.sent[1].params[0],{mentions:[A]});
     socket.emit('message',{id:1,result:4});
     socket.emit('message',{id:2,result:5});
+    socket.emit('message',null);
     socket.emit('message',notification(4));
     socket.emit('message',notification(5));
     const state=radar.snapshot();
@@ -97,41 +137,80 @@ test('Real input pipeline deduplicates mainnet stream and targeted-watch events'
   }finally{radar.stop();}
 });
 
-test('Radar HTTP boundary rejects rebinding, cross-site access and invalid JSON requests', async () => {
-  const radar = {snapshot: () => ({status:'local'}), assess: () => ({decision:'no_match'})};
+test('Policy API survives an interrupted upload and handles its full supported body size', {timeout:5000}, async()=>{
+  const radar = createRadar({env:{HUNTER_RADAR_DENY_ADDRESSES:B}});
   const server = createServer(radar);
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  const port = server.address().port;
-  function requestStatus({path='/api/snapshot', method='GET', headers={}, body}={}) {
-    return new Promise((resolve, reject) => {
-      const request = httpRequest({hostname:'127.0.0.1', port, path, method, headers}, response => {
-        response.resume();
-        response.on('end', () => resolve(response.statusCode));
-        response.on('error', reject);
-      });
-      request.on('error', reject);
-      request.end(body);
-    });
-  }
+  server.listen(0,'127.0.0.1');
+  await once(server,'listening');
+  const {port} = server.address();
+  const endpoint = `http://127.0.0.1:${port}/api/assess`;
+  const client = connect(port,'127.0.0.1');
   try {
-    assert.equal(await requestStatus(), 200);
-    assert.equal(await requestStatus({headers:{Host:'localhost:'+port}}), 200);
-    assert.equal(await requestStatus({headers:{Host:'attacker.example:'+port}}), 403);
-    assert.equal(await requestStatus({headers:{Host:'127.0.0.1:1'}}), 403);
-    assert.equal(await requestStatus({headers:{Origin:'http://attacker.example'}}), 403);
-    assert.equal(await requestStatus({headers:{'Sec-Fetch-Site':'cross-site'}}), 403);
-    const body = JSON.stringify({programIds:[],accounts:[]});
-    assert.equal(await requestStatus({
-      path:'/api/assess', method:'POST', body, headers:{'Content-Type':'application/json'}
-    }), 200);
-    assert.equal(await requestStatus({
-      path:'/api/assess', method:'POST', body, headers:{'Content-Type':'text/plain'}
-    }), 415);
-    assert.equal(await requestStatus({
-      path:'/api/assess', method:'POST', body:'x'.repeat(4097),
-      headers:{'Content-Type':'application/json'}
-    }), 413);
+    await once(client,'connect');
+    const incoming = once(server,'request');
+    client.write(`POST /api/assess HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nContent-Length: 100\r\n\r\n{`);
+    const [req] = await incoming;
+    const aborted = once(req,'aborted');
+    client.destroy();
+    await aborted;
+
+    const post = body=>fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body});
+    assert.equal((await post('{')).status,400);
+    // This is fewer than 8192 characters, but more than 8192 UTF-8 bytes.
+    assert.equal((await post(JSON.stringify('é'.repeat(4096)))).status,413);
+    const valid = JSON.stringify({programIds:Array(64).fill(B),accounts:Array(64).fill(B)});
+    const response = await post(valid.padEnd(8192));
+    assert.equal(response.status,200);
+    assert.equal((await response.json()).decision,'deny');
+    assert.equal(radar.snapshot().counters.policyChecks,1);
+    assert.equal((await fetch(`http://127.0.0.1:${port}/api/health`)).status,200);
   } finally {
-    await new Promise(resolve => server.close(resolve));
+    client.destroy();
+    await new Promise(resolve=>server.close(resolve));
   }
+});
+
+test('Loopback API rejects a non-local Host and survives an invalid request target',async()=>{
+  const server = createServer(createRadar({env:{}}));
+  server.listen(0,'127.0.0.1');
+  await once(server,'listening');
+  const {port} = server.address();
+  const status = (path,host)=>new Promise((resolve,reject)=>{
+    const req = request({hostname:'127.0.0.1',port,path,headers:{host}},res=>{
+      res.resume();
+      resolve(res.statusCode);
+    });
+    req.on('error',reject);
+    req.end();
+  });
+  try {
+    assert.equal(await status('/api/snapshot',`rebound.invalid:${port}`),403);
+    assert.equal(await status('http://[',`127.0.0.1:${port}`),400);
+    assert.equal(await status('/api/snapshot',`localhost:${port}`),200);
+  } finally { await new Promise(resolve=>server.close(resolve)); }
+});
+
+test('Local HTTP boundary rejects rebinding, cross-site access and non-JSON policy requests', async()=>{
+  const radar = {snapshot:()=>({status:'local'}),assess:()=>({decision:'no_match'})};
+  const server=createServer(radar);
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const port=server.address().port;
+  const status=({path='/api/snapshot',method='GET',headers={},body}={})=>new Promise((resolve,reject)=>{
+    const req=request({hostname:'127.0.0.1',port,path,method,headers},res=>{
+      res.resume();res.on('end',()=>resolve(res.statusCode));res.on('error',reject);
+    });
+    req.on('error',reject);req.end(body);
+  });
+  try {
+    assert.equal(await status(),200);
+    assert.equal(await status({headers:{Host:'localhost:'+port}}),200);
+    assert.equal(await status({headers:{Host:'attacker.example:'+port}}),403);
+    assert.equal(await status({headers:{Host:'127.0.0.1:1'}}),403);
+    assert.equal(await status({headers:{Origin:'http://attacker.example'}}),403);
+    assert.equal(await status({headers:{'Sec-Fetch-Site':'cross-site'}}),403);
+    const body=JSON.stringify({programIds:[],accounts:[]});
+    assert.equal(await status({path:'/api/assess',method:'POST',body,headers:{'Content-Type':'application/json'}}),200);
+    assert.equal(await status({path:'/api/assess',method:'POST',body,headers:{'Content-Type':'text/plain'}}),415);
+    assert.equal(await status({path:'/api/assess',method:'POST',body:'x'.repeat(8193),headers:{'Content-Type':'application/json'}}),413);
+  } finally {await new Promise(resolve=>server.close(resolve));}
 });

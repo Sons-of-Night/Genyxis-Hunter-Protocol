@@ -1,0 +1,28 @@
+name: Hunter Radar validation
+on:
+  pull_request:
+    paths:
+      - 'radar/**'
+      - '.github/workflows/hunter-radar-validation.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'radar/**'
+      - '.github/workflows/hunter-radar-validation.yml'
+permissions:
+  contents: read
+jobs:
+  radar-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install locked dependencies
+        run: npm --prefix radar ci
+      - name: Test Radar
+        run: npm --prefix radar test
+      - name: Parse updated server
+        run: node --check radar/server.mjs

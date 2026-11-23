@@ -19,6 +19,7 @@ Node.js 22 or later required. From the repository root:
 
     cd radar
     node --version
+    npm ci
     node --test test/*.test.mjs
 
     export HUNTER_RADAR_RPC_HTTP='https://api.mainnet.solana.com'
@@ -43,12 +44,70 @@ Content-Type: application/json
 
 Returns decision=deny only for an address on the configured denylist; otherwise decision=no_match. No_match does NOT prove that the transaction is safe. This endpoint does not simulate, sign, submit or stop a transaction. A customer's wallet or dApp must integrate and honor its decision to provide preventive action. Do not directly expose this unauthenticated loopback-only prototype to the internet.
 
+Send up to 64 addresses in each array and keep the UTF-8 JSON body within 8 KiB. Requests larger than 8 KiB receive HTTP 413. Use a loopback hostname or address in the request URL.
+
+## Protected SOL withdrawal signing
+
+The withdrawal guard runs inside a separate, trusted signer. It addresses the signing-service bypass Binance described after the October 29, 2026 theft. A withdrawal container can propose a transfer, but the signer requires an independent approval even when the transfer looks ordinary and its destination has no known threat history. [Binance preliminary incident findings](https://www.binance.com/en/square/post/384328127385979)
+
+1. Give the approval service a separate Ed25519 key and identity. Independently verify the withdrawal against your authorization records. Use `inspectWithdrawal(transaction)` to review the signer, destination, and amount in lamports before approving. Sign `withdrawalApprovalMessage(transaction, expiresAt)` with the approval key. Supply `{expiresAt, signature}` to the signer, with expiry in Unix milliseconds up to 60 seconds ahead and the Ed25519 signature in base64.
+2. Keep the withdrawal key and its KMS permissions outside the withdrawal application, its CI/CD role, and the Radar dashboard. Configure the signer with the approval public key, a destination allowlist, and a per-transfer cap. Make the guard the only application path to the withdrawal key. Use distinct, separately managed access for approval and signer policy changes.
+3. Configure a trusted Solana HTTPS RPC and a Blockaid API key in the isolated service. Each approved request checks the RPC's mainnet identity, simulates the exact unsigned transaction, and requests a new Blockaid verdict. An outage, failed simulation, warning, or missing verdict withholds the signature. Both providers receive the unsigned transaction. Blockaid also receives the signer’s public address. [Solana simulation API](https://solana.com/docs/rpc/http/simulatetransaction) · [Blockaid Solana API](https://github.com/blockaid-official/blockaid-client-node/blob/main/src/resources/solana/message.ts)
+
+```js
+import {createProtectedWithdrawalSigner} from './withdrawal-guard.mjs';
+
+const signWithdrawal = createProtectedWithdrawalSigner({
+  signerAddress: config.walletAddress,
+  approverPublicKey: config.approverPublicKeyPem,
+  allowedDestinations: config.treasuryAddresses,
+  maxLamports: BigInt(config.maxWithdrawalLamports),
+  blockaidApiKey: process.env.BLOCKAID_CLIENT_API_KEY,
+  rpcUrl: config.mainnetRpcUrl,
+  signMessage: (messageBytes, {signal}) => isolatedSigner.signEd25519(messageBytes, {signal})
+});
+
+const signedTransaction = await signWithdrawal({transaction, approval});
+```
+
+`transaction` is a canonical base64 Solana wire transaction with a zeroed signature slot. The guard permits a single native SOL transfer in legacy or v0 format, with a recent blockhash, one signer, and no lookup tables or extra instructions. The adapter returns a raw 64-byte Ed25519 signature. The guard verifies it against the original message and returns a base64 signed transaction for the caller to submit. This is a per-transfer policy for designated wallets and treasury destinations. Token withdrawals, swaps, v1 transactions, durable nonces, and other chains are outside its scope. The dashboard remains a separate read-only service. Live signer and provider acceptance tests are pending.
+
+### Approval and signer pilot
+
+From `radar`, run the handoff test using disposable keys and local provider fixtures. It covers the approval command, receipt validation, the KMS request, and verification of the returned Solana signature.
+
+```powershell
+npm.cmd ci
+node --test .\test\withdrawal-pilot.test.mjs
+```
+
+For the live pilot, run `--address` with the pilot key's full KMS ARN. This reads the public key and prints the Solana address. Use it as `signer` in `proposal.json`. Supply `destination` as the pilot recipient's Solana address and `lamports` as a decimal string. Optional `rpcUrl` defaults to the public mainnet HTTPS endpoint. Generate `unsigned.txt` just before approval so its blockhash is still current. The proposal command reads the mainnet blockhash and writes an unsigned transaction. [Solana blockhash RPC](https://solana.com/docs/rpc/http/getlatestblockhash) · [AWS KMS public key API](https://docs.aws.amazon.com/kms/latest/APIReference/API_GetPublicKey.html)
+
+```powershell
+node .\kms-withdrawal-signer.mjs --address '<pilot-key-arn>'
+node .\prepare-withdrawal-proposal.mjs .\proposal.json .\unsigned.txt
+```
+
+On the approval host, verify the withdrawal against an independent record. The record JSON must supply `withdrawalId` as a unique lowercase identifier, `signer` and `destination` as Solana addresses, and `lamports` as a decimal string. The approval command compares all three transfer fields, issues a 45-second approval, and prints the receipt path. Keep a single protected receipt directory for the approval role. The withdrawal application must have no write access to the records or receipts and no access to the approval key. The command refuses a second approval for the same ID, even with a different blockhash. Reconcile the earlier request before issuing any replacement.
+
+```powershell
+node .\withdrawal-approval.mjs .\unsigned.txt .\trusted-record.json .\approver-private.pem .\receipts
+```
+
+On the isolated signer host, configure `signer-config.json` with `keyArn`, `signerAddress`, `allowedDestinations` (an array), `maxLamports` (a decimal string), and `approverPublicKeyFile` (relative to the config file). Optional `rpcUrl` defaults to Solana's public mainnet HTTPS endpoint. Use a pilot Ed25519 `SIGN_VERIFY` KMS key with an immutable key ARN and pass `BLOCKAID_CLIENT_API_KEY` through the signer's secret store. Grant the signer role `kms:GetPublicKey` and `kms:Sign` on that key. Keep these permissions and role assumption outside the withdrawal application's and deployment role's reach. [AWS KMS signing API](https://docs.aws.amazon.com/kms/latest/APIReference/API_Sign.html)
+
+Pass the printed receipt file and original proposal to the signer promptly. For the first live acceptance run, `--discard` verifies the KMS signature and releases no signed transaction. Use `signed.txt` in its place only when an integrating application needs the verified signed transaction. The signer writes a new file and does not broadcast it. Keep key files, configuration secrets, receipts, and signed transactions in access-controlled directories outside the repository.
+
+```powershell
+node .\kms-withdrawal-signer.mjs .\signer-config.json .\unsigned.txt .\approval-receipt.json --discard
+```
+
 ## Current limits
 
-1. Session-only, bounded activity history (500 events in memory, last 100 sent to the dashboard). Stream gaps are not backfilled. Confirmed commitment can later be reorganized; no finalized reconciliation yet.
+1. The activity timeline aggregates the current minute and the previous 14 minutes independently of event details (500 in memory, 100 sent to the dashboard). The last 65,536 distinct signatures are tracked for deduplication during the session. Stream gaps are not backfilled, and confirmed transactions can still be reorganized.
 2. An all-logs subscription may not provide complete reliable network coverage due to provider limits. Production requires durable indexing, Yellowstone/Geyser streaming, missed-slot backfill and coverage metrics.
 3. No validated classification of malicious AI agents, drainers, exploits, safe contracts or infected wallets. Simple failed transactions are not attacks.
-4. Operator-configured denylist only; policy decisions are recommendations and not proof that an on-chain attack was blocked.
+4. The dashboard’s address policy remains advisory. Enforcement applies when an isolated wallet signer integrates the protected SOL withdrawal guard.
 5. Real security productization requires verified threat intelligence, decoded transactions and balances, pre-sign simulation, authenticated multi-tenant services, incident evidence, secure alerts, independent review and wallet/dApp enforcement integrations.
 6. Watch addresses may be sensitive. Keep seed phrases, private keys, lab DNA data and other personal secrets off the dashboard and RPC provider.
 
@@ -78,6 +137,27 @@ The backend deliberately excludes source/destination IP addresses, raw payloads 
 
 **Cloudflare boundary:** The current first sensor is local-file-based; it is **not deployed to Cloudflare**. A future authenticated telemetry uplink or managed container would be needed to securely stream sanitized Kali events into a Cloudflare-hosted customer dashboard.
 
+## Validate the first sensor on Kali or Ubuntu
+
+Run this on a Genyxis-owned or explicitly authorized Kali/Ubuntu host with Node.js 22 or newer, npm, and Suricata. Check prerequisites from the `radar` directory:
+
+    node --version
+    suricata -V
+    npm test
+
+If Suricata is missing, install the distribution package on the test host with `sudo apt update && sudo apt install suricata`. Then, in the same terminal:
+
+    sudo -v
+    npm run verify:suricata
+
+The check starts a short-lived Suricata capture of one randomly assigned UDP destination port on `127.0.0.1`. A harmless marker sent to that port triggers a dedicated passive rule. The script checks the real EVE record and the alert in Radar's HTTP snapshot. It checks for zero reported blocks, zero Solana observations, and the absence of raw IPs, ports, or packet payloads from the API event. Only the packet capture runs with elevated permissions. Radar listens on a temporary loopback port and the test runs without external RPC traffic.
+
+- **Pass:** Save the three console lines beginning with `PASS Hunter Radar live loopback` as evidence for roadmap issue #2. They include the Suricata and Node versions, time, and alert results.
+- **Fail before capture:** Check that `suricata -V` succeeds and that `sudo -v` ran in the same terminal. Use the Linux host or VM where packet capture is permitted.
+- **Fail during capture:** The script prints the paths of the local Suricata startup log and EVE file. Review startup errors first, then check whether EVE contains the probe signature. The EVE file includes raw loopback addresses and ports.
+
+For the separate mainnet check, start Radar normally with the public mainnet endpoints in the setup section. Open `http://127.0.0.1:4190/api/health` and confirm `rpcOk: true`, an integer `currentSlot`, `subscribed: true`, and an increasing `counters.observed`. Stop Radar with Ctrl+C. Keep this result separate from the loopback evidence. A passing loopback proves local capture and ingestion. Mainnet availability and customer-network coverage require their own evidence.
+
 ## Verification
 
 Run the offline deterministic logic tests with:
@@ -86,11 +166,8 @@ Run the offline deterministic logic tests with:
 
 The tests use synthetic fixtures to validate the parser and API. The running product never reads test fixtures or displays mock alerts.
 
-## Local HTTP boundary hardening (proposed)
+## Local HTTP boundary hardening
 
-Huntxr Radar's local API is bound to `127.0.0.1`. The Phase 1 hardening branch also rejects non-local/mismatched `Host` headers (DNS-rebinding defense), cross-origin and cross-site browser requests, and non-JSON policy submissions. Policy request bodies are capped at 4 KiB by byte count; HTTP headers and request lifetimes have bounded server settings. The dashboard continues to work from `http://127.0.0.1:4190` or `http://localhost:4190` on the machine running Radar.
+The Radar HTTP listener remains loopback-only. A Host matching the actual local listener, same-origin browser requests, and JSON policy submissions are required. It rejects DNS-rebinding hosts, cross-site requests and mismatched ports, and adds bounded HTTP request/header lifetimes and restrictive browser headers. The policy body limit remains **8 KiB** (not 4 KiB) to preserve the documented 64+64 address contract and interrupted-upload handling from PR #4.
 
-Run `npm test` in `radar/` after pulling the reviewed branch. The HTTP boundary regression tests exercise normal local access, rejected foreign hosts, rejected cross-site contexts, JSON content-type requirements, and the body cap. They are **not** a substitute for a pen test or live service verification.
-
-**Remaining limits:** loopback access is not user authentication. Other local processes may still reach the API, and the policy endpoint is not suitable for remote or multi-tenant use. Do **not** forward the Radar port, add a public reverse proxy, or expose it via Cloudflare Tunnel until authenticated access, tenant isolation, and authorization are implemented and tested. Cloudflare/WAF rules alone cannot provide local API authorization. The network feed and sensor data remain untrusted, best-effort security observations.
-
+The boundary has deterministic regression tests in `npm test`; loopback controls are **not** authentication. Do not forward this port or expose it via a public reverse proxy or Cloudflare Tunnel without a separate authenticated, authorized service boundary. Live host and network sensor verification are still required.

@@ -14,22 +14,23 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 export const ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const SIGNATURE = /^[1-9A-HJ-NP-Za-km-z]{64,100}$/;
 const HISTORY_LIMIT = 500;
-const MAX_WATCH = 12;
-const MAX_ASSESS_BYTES = 4096;
+const SIGNATURE_HISTORY_LIMIT = 65_536;
+const TIMELINE_MINUTES = 15;
+const MINUTE_MS = 60_000;
+const ASSESS_BODY_LIMIT = 8_192;
 const LOCAL_HOST = /^(?:localhost|127\.0\.0\.1)(?::([1-9][0-9]{0,4}))?$/i;
 
-// Reject DNS-rebinding hosts and cross-site browser requests even on loopback.
-// This is a boundary guard, not a substitute for authentication of local clients.
 function trustedLocalRequest(req) {
   const host = req.headers.host;
   if (typeof host !== 'string') return false;
   const match = LOCAL_HOST.exec(host);
   if (!match || (match[1] && Number(match[1]) !== req.socket.localPort)) return false;
   const origin = req.headers.origin;
-  if (origin !== undefined && origin !== 'http://' + host.toLowerCase()) return false;
+  if (origin !== undefined && origin.toLowerCase() !== 'http://' + host.toLowerCase()) return false;
   const site = req.headers['sec-fetch-site'];
   return site === undefined || site === 'same-origin' || site === 'none';
 }
+const MAX_WATCH = 12;
 
 function addresses(text, max = 64) {
   const items = String(text || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -64,9 +65,10 @@ export function assessPolicy(programIds, accounts, denySet) {
 export function normalizeObservation(notification, watchedAddress, denySet, now = Date.now()) {
   const result = notification?.params?.result;
   const value = result?.value;
-  if (!value || !SIGNATURE.test(value.signature || '') || !Array.isArray(value.logs)) return null;
+  if (!value || typeof value.signature !== 'string' || !SIGNATURE.test(value.signature) || !Array.isArray(value.logs)) return null;
   const invoked = [...new Set(value.logs.map(s => {
-    const match = /^Program ([1-9A-HJ-NP-Za-km-z]{32,44}) invoke \[/.exec(String(s));
+    if (typeof s !== 'string') return null;
+    const match = /^Program ([1-9A-HJ-NP-Za-km-z]{32,44}) invoke \[/.exec(s);
     return match?.[1] || null;
   }).filter(Boolean))];
   const matches = invoked.filter(program => denySet.has(program));
@@ -81,20 +83,6 @@ export function normalizeObservation(notification, watchedAddress, denySet, now 
     // A failed transaction or denylist match is NOT proof of malicious intent.
     finding: matches.length ? 'Configured policy match' : (failed ? 'Transaction failure' : 'Observed transaction')
   };
-}
-export function buckets(events, now, minutes = 15) {
-  const list = Array.from({length: minutes}, (_, i) => ({
-    minute: i - minutes + 1, observed: 0, failed: 0, policy: 0
-  }));
-  for (const e of events) {
-    const offset = Math.floor((now - e.time) / 60000);
-    if (offset < 0 || offset >= minutes) continue;
-    const bucket = list[minutes - 1 - offset];
-    bucket.observed++;
-    if (e.outcome === 'failed') bucket.failed++;
-    if (e.policyMatches.length) bucket.policy++;
-  }
-  return list;
 }
 export function createRadar({
   env = process.env,
@@ -114,25 +102,47 @@ export function createRadar({
   let refreshTimer = null, totalObserved = 0, totalFailed = 0, totalPolicyMatches = 0;
   let totalWatchObserved = 0, checks = 0, denyRecommendations = 0, seq = 0;
   const events = new Map(), pending = new Map(), subscriptions = new Map();
+  // Keep counting and deduplication independent of the dashboard's event list.
+  const seenSignatures = new Map();
+  const timeline = Array(TIMELINE_MINUTES);
 
   function record(observation) {
-    const old = events.get(observation.signature);
-    if (old) {
+    const {signature, watchedAddresses} = observation;
+    const watched = watchedAddresses.length > 0;
+    const alreadyWatched = seenSignatures.get(signature);
+    if (alreadyWatched !== undefined) {
       // A watch subscription may arrive after the chain-wide one.
-      for (const address of observation.watchedAddresses) {
-        if (!old.watchedAddresses.includes(address)) {
-          old.watchedAddresses.push(address);
-          if (old.watchedAddresses.length === 1) totalWatchObserved++;
-        }
+      if (watched && !alreadyWatched) {
+        seenSignatures.set(signature, true);
+        totalWatchObserved++;
+      }
+      const retained = events.get(signature);
+      if (retained && watched && !retained.watchedAddresses.includes(watchedAddresses[0])) {
+        retained.watchedAddresses.push(watchedAddresses[0]);
       }
       return;
     }
-    events.set(observation.signature, observation);
-    totalObserved++;
-    if (observation.outcome === 'failed') totalFailed++;
-    if (observation.policyMatches.length) totalPolicyMatches++;
-    if (observation.watchedAddresses.length) totalWatchObserved++;
+
+    seenSignatures.set(signature, watched);
+    if (seenSignatures.size > SIGNATURE_HISTORY_LIMIT) seenSignatures.delete(seenSignatures.keys().next().value);
+    events.set(signature, observation);
     if (events.size > HISTORY_LIMIT) events.delete(events.keys().next().value);
+
+    const minute = Math.floor(observation.time / MINUTE_MS);
+    const index = minute % TIMELINE_MINUTES;
+    if (timeline[index]?.minute !== minute) timeline[index] = {minute, observed:0, failed:0, policy:0};
+    const bucket = timeline[index];
+    bucket.observed++;
+    totalObserved++;
+    if (observation.outcome === 'failed') {
+      bucket.failed++;
+      totalFailed++;
+    }
+    if (observation.policyMatches.length) {
+      bucket.policy++;
+      totalPolicyMatches++;
+    }
+    if (watched) totalWatchObserved++;
   }
   function sendSubscription(filter, watchAddress = null) {
     const id = ++seq;
@@ -156,9 +166,11 @@ export function createRadar({
         let message;
         try { message = JSON.parse(typeof event.data === 'string' ? event.data : String(event.data)); }
         catch { return; }
+        if (!message || typeof message !== 'object') return;
         if (Number.isInteger(message.id) && pending.has(message.id)) {
           if (message.error) {
-            lastError = 'Subscription rejected: ' + String(message.error.message || 'RPC error').slice(0, 130);
+            const reason = message.error.message;
+            lastError = 'Subscription rejected: ' + (typeof reason === 'string' ? reason.slice(0, 130) : 'RPC error');
           } else if (Number.isInteger(message.result)) {
             subscriptions.set(message.result, pending.get(message.id));
             if (pending.get(message.id) === null) subscribed = true;
@@ -172,7 +184,7 @@ export function createRadar({
         if (address === undefined) return;
         const observed = normalizeObservation(message, address, deny, now());
         if (observed) {
-          lastEventAt = now();
+          lastEventAt = observed.time;
           record(observed);
         }
       });
@@ -212,7 +224,15 @@ export function createRadar({
     return result;
   }
   function snapshot() {
-    const time = now(), recent = [...events.values()].reverse();
+    const currentMinute = Math.floor(now() / MINUTE_MS);
+    const buckets = Array.from({length:TIMELINE_MINUTES}, (_, i) => {
+      const offset = i - TIMELINE_MINUTES + 1;
+      const minute = currentMinute + offset;
+      const bucket = timeline[minute % TIMELINE_MINUTES];
+      if (bucket?.minute !== minute) return {minute:offset, observed:0, failed:0, policy:0};
+      return {...bucket, minute:offset};
+    });
+    const recent = [...events.values()].slice(-100).reverse();
     return {
       product:'Hunter Radar', chain:'Solana', cluster:'mainnet-beta', mode:'REAL MAINNET — READ ONLY',
       sourceHost:rpcHost, connected, subscribed, rpcOk, currentSlot, lastRpcAt,
@@ -224,7 +244,7 @@ export function createRadar({
         observed:totalObserved, failed:totalFailed, policyMatches:totalPolicyMatches,
         watchObserved:totalWatchObserved, policyChecks:checks, denyRecommendations
       },
-      buckets:buckets(recent, time), events:recent.slice(0,100)
+      buckets, events:recent
     };
   }
   const startedAt = now();
@@ -253,39 +273,39 @@ export function createServer(radar) {
       'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
     };
     for (const [k,v] of Object.entries(security)) res.setHeader(k,v);
+    // A loopback listener can still receive a browser request with a rebound hostname.
     if (!trustedLocalRequest(req)) {
-      res.writeHead(403); res.end('Local origin required'); return;
+      res.writeHead(403);res.end('Local origin required');return;
     }
-    const url = new URL(req.url,'http://localhost');
+    let url;
+    try { url = new URL(req.url,'http://localhost'); }
+    catch { res.writeHead(400);res.end('Invalid request target');return; }
     if (req.method === 'GET' && (url.pathname === '/api/snapshot' || url.pathname === '/api/health')) {
       res.writeHead(200,{'Content-Type':'application/json; charset=utf-8'});
       res.end(JSON.stringify(radar.snapshot())); return;
     }
     if (req.method === 'POST' && url.pathname === '/api/assess') {
       if (!/^application\/json(?:\s*;\s*charset\s*=\s*utf-8)?$/i.test(req.headers['content-type'] || '')) {
-        res.writeHead(415); res.end('Expected application/json'); return;
+        res.writeHead(415);res.end('Expected application/json');return;
       }
-      if (Number(req.headers['content-length'] || 0) > MAX_ASSESS_BYTES) {
-        res.writeHead(413); res.end('Request too large'); return;
-      }
-      let chunks = [], bytes = 0, rejected = false;
       try {
-        for await (const chunk of req) {
-          bytes += chunk.length;
-          if (bytes > MAX_ASSESS_BYTES) { rejected = true; chunks = []; }
-          else if (!rejected) chunks.push(chunk);
+        const chunks = [];
+        let size = 0;
+        for await (const chunk of req.iterator({destroyOnReturn:false})) {
+          size += chunk.length;
+          if (size > ASSESS_BODY_LIMIT) {
+            res.writeHead(413, {'Connection':'close'});
+            res.end('Request too large');
+            return;
+          }
+          chunks.push(chunk);
         }
-      } catch {
-        if (!res.destroyed) { res.writeHead(400); res.end('Invalid request body'); }
-        return;
-      }
-      if (rejected) { res.writeHead(413); res.end('Request too large'); return; }
-      const data = Buffer.concat(chunks).toString('utf8');
-      try {
-        const result = radar.assess(JSON.parse(data));
+        const payload = JSON.parse(Buffer.concat(chunks, size).toString('utf8'));
+        const result = radar.assess(payload);
         res.writeHead(200,{'Content-Type':'application/json; charset=utf-8'});
         res.end(JSON.stringify(result));
       } catch(error) {
+        if (res.destroyed || req.socket.destroyed) return;
         res.writeHead(400,{'Content-Type':'application/json; charset=utf-8'});
         res.end(JSON.stringify({error:String(error.message).slice(0,180)}));
       }
