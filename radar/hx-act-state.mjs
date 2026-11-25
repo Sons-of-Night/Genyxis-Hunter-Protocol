@@ -91,12 +91,12 @@ export function openState({path,auditKey,now=Date.now,checkpoint}={}){
   validateOptions(path,auditKey,now);
   const db=database(path);
   const log=ledger(db,auditKey,now);
-  let closed=false;
+  let closed=false,integrityFailed=false;
   try{
     if(db.prepare('PRAGMA user_version').get().user_version!==1) deny();
     transaction(db,()=>log.verifyChain(checkpoint),false);
   }catch(e){log.clear();db.close();throw e;}
-  const ensure=()=>{if(closed) deny();};
+  const ensure=()=>{if(closed||integrityFailed) deny();};
   function time(){
     const at=now(),last=log.tail();
     if(!clock(at)||!last||at<last.at) deny();
@@ -135,7 +135,8 @@ export function openState({path,auditKey,now=Date.now,checkpoint}={}){
     // Save checkpoints independently of the database to detect rollback/truncation.
     verifyAudit(trustedCheckpoint){
       ensure();
-      return transaction(db,()=>log.verifyChain(trustedCheckpoint),false);
+      try{return transaction(db,()=>log.verifyChain(trustedCheckpoint),false);}
+      catch(e){integrityFailed=true;throw e;}
     },
     close(){if(!closed){closed=true;log.clear();db.close();}}
   });
