@@ -18,7 +18,8 @@ const SIGNATURE_HISTORY_LIMIT = 65_536;
 const TIMELINE_MINUTES = 15;
 const MINUTE_MS = 60_000;
 const ASSESS_BODY_LIMIT = 8_192;
-const MAX_WS_MESSAGE_BYTES = 256 * 1024;
+export const MAX_WS_MESSAGE_BYTES = 256 * 1024;
+const WS_SIZE_BOUNDS = [1024,4096,16384,65536,131072,MAX_WS_MESSAGE_BYTES];
 const LOCAL_HOST = /^(?:localhost|127\.0\.0\.1)(?::([1-9][0-9]{0,4}))?$/i;
 
 function trustedLocalRequest(req) {
@@ -101,6 +102,14 @@ export function createRadar({
   let rpcOk = false, currentSlot = null, lastRpcAt = null, rpcError = null;
   let lastError = null, reconnections = 0, gapCount = 0, reconnectTimer = null;
   let rejectedMessages = 0;
+  const messageSizes = {textMessages:0,textBytes:0,maxTextBytes:0,oversizedMessages:0,nonTextMessages:0,counts:Array(WS_SIZE_BOUNDS.length+1).fill(0)};
+  function measureText(bytes) {
+    messageSizes.textMessages++;
+    messageSizes.textBytes += bytes;
+    messageSizes.maxTextBytes = Math.max(messageSizes.maxTextBytes,bytes);
+    const index = WS_SIZE_BOUNDS.findIndex(bound=>bytes<=bound);
+    messageSizes.counts[index===-1?WS_SIZE_BOUNDS.length:index]++;
+  }
   let refreshTimer = null, totalObserved = 0, totalFailed = 0, totalPolicyMatches = 0;
   let totalWatchObserved = 0, checks = 0, denyRecommendations = 0, seq = 0;
   const events = new Map(), pending = new Map(), subscriptions = new Map();
@@ -181,9 +190,18 @@ export function createRadar({
       });
       socket.addEventListener('message', event => {
         if (!active() || !connected) return;
-        if (typeof event.data !== 'string' || Buffer.byteLength(event.data, 'utf8') > MAX_WS_MESSAGE_BYTES) {
+        if (typeof event.data !== 'string') {
+          messageSizes.nonTextMessages++;
           rejectedMessages++; gapCount++;
-          lastError = 'Unsupported or oversized WebSocket message';
+          lastError = 'Unsupported WebSocket message type';
+          return;
+        }
+        const bytes = Buffer.byteLength(event.data,'utf8');
+        measureText(bytes);
+        if (bytes > MAX_WS_MESSAGE_BYTES) {
+          messageSizes.oversizedMessages++;
+          rejectedMessages++; gapCount++;
+          lastError = 'Oversized WebSocket message';
           return;
         }
         let message;
@@ -256,6 +274,11 @@ export function createRadar({
       product:'Hunter Radar', chain:'Solana', cluster:'mainnet-beta', mode:'REAL MAINNET — READ ONLY',
       sourceHost:rpcHost, connected, subscribed, rpcOk, currentSlot, lastRpcAt,
       lastEventAt, lastError, rpcError, gapCount, rejectedMessages,
+      messageSizes:{
+        ...messageSizes, limitBytes:MAX_WS_MESSAGE_BYTES,
+        boundsBytes:[...WS_SIZE_BOUNDS], counts:[...messageSizes.counts],
+        scope:'Session totals for active socket text messages before parsing; final bucket exceeds limit.'
+      },
       completeness:'Best-effort live feed. Provider throttling, disconnects and retention limits may omit transactions.',
       scope:'All non-vote transaction logs received from selected mainnet RPC since process start; only configured policy matches are flagged.',
       watchCount:watch.length, watchAddresses:watch, denylistSize:deny.size,
