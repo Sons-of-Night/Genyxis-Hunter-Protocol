@@ -273,7 +273,8 @@ export function createRadar({
       if (!response.ok) throw new Error('HTTP ' + response.status);
       const body = await response.json();
       if (!Number.isSafeInteger(body.result) || body.result < 0) throw new Error('Bad getSlot response');
-      if (stopped || controller.signal.aborted) return;
+      if (stopped) return;
+      if (controller.signal.aborted) throw new Error('RPC health check timed out');
       if (currentSlot !== null && body.result < currentSlot) throw new Error('RPC slot regressed');
       if (currentSlot !== null && body.result > currentSlot) lastSlotAdvanceAt = now();
       currentSlot = body.result; rpcOk = true; rpcError = null; lastRpcAt = now(); lastRpcSuccessAt = lastRpcAt;
