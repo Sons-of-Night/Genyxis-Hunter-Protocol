@@ -108,13 +108,14 @@ function renderKali(snapshot){
 }
 
 function render(snapshot) {
-  const connected=snapshot.connected && snapshot.subscribed;
+  const connected=snapshot.feed?.status==='live';
+  const degraded=snapshot.feed?.status==='degraded';
   const status=byId('liveStatus');
-  status.textContent=connected?'LIVE FEED':snapshot.connected?'SUBSCRIBING':'DISCONNECTED';
+  status.textContent=connected?'LIVE FEED':degraded?'DEGRADED':snapshot.connected?'SUBSCRIBING':'DISCONNECTED';
   status.className='status '+(connected?'':snapshot.connected?'muted':'bad');
   byId('sideDot').className='dot '+(connected?'on':'off');
   text('sideState',connected?'MAINNET FEED CONNECTED':'MAINNET FEED NOT READY');
-  text('rpcStatus',snapshot.rpcOk?'RPC • SLOT '+formatter.format(snapshot.currentSlot):'RPC unavailable');
+  text('rpcStatus',snapshot.feed?.rpcFresh?'RPC • SLOT '+formatter.format(snapshot.currentSlot):'RPC unavailable');
   text('lastReceived',timeAgo(snapshot.lastEventAt));
   renderKali(snapshot);
   text('mObserved',formatter.format(snapshot.counters.observed));
@@ -126,14 +127,16 @@ function render(snapshot) {
   text('sWatch',snapshot.watchCount ? snapshot.watchCount+' address'+(snapshot.watchCount===1?'':'es') : 'Unconfigured');
   text('sPolicy',snapshot.denylistSize ? snapshot.denylistSize+' entry'+(snapshot.denylistSize===1?'':'ies') : 'Unconfigured');
   text('sAssessment','Local API active');
-  text('sceneBadge',connected?'LIVE MAINNET':snapshot.connected?'SUBSCRIBING':'NO LIVE FEED');
+  text('sceneBadge',connected?'LIVE MAINNET':degraded?'DEGRADED FEED':snapshot.connected?'SUBSCRIBING':'NO LIVE FEED');
   text('feedCount',snapshot.events.length+' recent');
-  text('coverage','Session started '+new Date(snapshot.sessionStartedAt).toLocaleTimeString()+' • Disconnection gaps: '+snapshot.gapCount);
+  text('coverage','Session started '+new Date(snapshot.sessionStartedAt).toLocaleTimeString()+' • Coverage gaps: '+snapshot.gapCount);
   const warnings=[];
-  if(!connected) warnings.push('Live mainnet feed is not yet connected. No protection or full coverage can be claimed.');
+  if(!connected) warnings.push('Live mainnet feed is not verified current. No protection or full coverage can be claimed.');
+  if(snapshot.feed && !snapshot.feed.chainFresh) warnings.push('Current connection has no recent chain-wide observation.');
+  if(snapshot.feed && !snapshot.feed.slotAdvancing) warnings.push('Recent RPC slot advancement has not been verified.');
   if(snapshot.lastError)warnings.push(snapshot.lastError);
   if(snapshot.rpcError)warnings.push('RPC health: '+snapshot.rpcError);
-  if(snapshot.gapCount)warnings.push(snapshot.gapCount+' connection interruption(s) since startup; missing transactions were not recovered.');
+  if(snapshot.gapCount)warnings.push(snapshot.gapCount+' potential coverage gap(s) since startup; missing transactions were not recovered.');
   if(snapshot.denylistSize===0)warnings.push('No denylist is configured. Policy-match detections are disabled.');
   if(snapshot.kali?.configured && !snapshot.kali.ready)warnings.push('Kali sensor: '+(snapshot.kali.lastError||'Log unavailable'));
   const warning=byId('warning');

@@ -20,6 +20,10 @@ const TIMELINE_MINUTES = 15;
 const MINUTE_MS = 60_000;
 const ASSESS_BODY_LIMIT = 8_192;
 export const MAX_WS_MESSAGE_BYTES = 256 * 1024;
+const CONNECT_TIMEOUT_MS = 15000;
+const SUBSCRIPTION_TIMEOUT_MS = 15000;
+const FEED_TIMEOUT_MS = 30000;
+const RPC_FRESH_MS = 60000;
 const WS_SIZE_BOUNDS = [1024,4096,16384,65536,131072,MAX_WS_MESSAGE_BYTES];
 const LOCAL_HOST = /^(?:localhost|127\.0\.0\.1)(?::([1-9][0-9]{0,4}))?$/i;
 
@@ -102,7 +106,11 @@ export function createRadar({
   let ws = null, stopped = false, connected = false, subscribed = false, lastEventAt = null;
   let rpcOk = false, currentSlot = null, lastRpcAt = null, rpcError = null;
   let lastError = null, reconnections = 0, gapCount = 0, reconnectTimer = null;
-  let rejectedMessages = 0;
+  let rejectedMessages = 0, retryStreak = 0;
+  let connectionStartedAt = null, openedAt = null, lastChainAt = null, retireActive = null;
+  let lastRpcSuccessAt = null, rpcInFlight = null, lastSlotAdvanceAt = null;
+  let healthTimer = null, started = false;
+  const fresh = (at,limit) => at !== null && now() >= at && now()-at < limit;
   const messageSizes = {textMessages:0,textBytes:0,maxTextBytes:0,oversizedMessages:0,nonTextMessages:0,counts:Array(WS_SIZE_BOUNDS.length+1).fill(0)};
   function measureText(bytes) {
     messageSizes.textMessages++;
@@ -167,23 +175,25 @@ export function createRadar({
   function connect() {
     if (stopped) return;
     pending.clear(); subscriptions.clear(); subscribed = false; connected = false;
+    connectionStartedAt = now(); openedAt = null; lastChainAt = null;
     try {
       const socket = webSocketFactory(wsUrl);
       ws = socket;
       const active = () => !stopped && ws === socket;
       const retire = (reason) => {
         if (!active()) return;
-        ws = null;
-        if (connected) gapCount++;
+        ws = null; retireActive = null;
+        gapCount++;
         connected = false; subscribed = false;
         pending.clear(); subscriptions.clear();
         if (reason) lastError = reason;
         try { socket.close(); } catch { /* Already retired. */ }
         reconnect();
       };
+      retireActive = retire;
       socket.addEventListener('open', () => {
         if (!active() || connected) return;
-        connected = true; lastError = null;
+        connected = true; openedAt = now(); lastError = null;
         try {
           sendSubscription(socket, 'all'); // Mainnet-wide non-vote transaction logs, subject to provider limits.
           for (const address of watch) sendSubscription(socket, {mentions:[address]}, address);
@@ -229,6 +239,7 @@ export function createRadar({
           if (!observed) { rejectedMessages++; gapCount++; return; }
           record(observed);
           lastEventAt = observed.time;
+          if (address === null && subscribed) { lastChainAt = observed.time; retryStreak = 0; }
         } catch {
           rejectedMessages++; gapCount++;
           lastError = 'Invalid transaction observation';
@@ -236,15 +247,22 @@ export function createRadar({
       });
       socket.addEventListener('error', () => { retire('WebSocket connection error'); });
       socket.addEventListener('close', () => { retire('WebSocket disconnected'); });
-    } catch(error) { lastError = String(error.message).slice(0,140); reconnect(); }
+    } catch { lastError = 'WebSocket setup failed'; if (retireActive) retireActive(lastError); else { gapCount++; reconnect(); } }
   }
   function reconnect() {
     if (stopped || reconnectTimer) return;
-    reconnections++;
-    reconnectTimer = setTimeout(() => {reconnectTimer = null; connect();}, Math.min(30000, 1000 * (2 ** Math.min(reconnections, 5))));
+    reconnections++; retryStreak++;
+    reconnectTimer = setTimeout(() => {reconnectTimer = null; connect();}, Math.min(30000, 1000 * (2 ** Math.min(retryStreak, 5))));
+  }
+  function checkFeed() {
+    if (stopped || !retireActive) return;
+    if (!connected && !fresh(connectionStartedAt,CONNECT_TIMEOUT_MS)) retireActive('WebSocket connection timed out');
+    else if (connected && !subscribed && !fresh(openedAt,SUBSCRIPTION_TIMEOUT_MS)) retireActive('Mainnet subscription timed out');
+    else if (connected && subscribed && !fresh(lastChainAt ?? openedAt,FEED_TIMEOUT_MS)) retireActive('Mainnet observation feed stale');
   }
   async function checkRpc() {
-    const controller = new AbortController();
+    if (stopped || rpcInFlight) return;
+    const controller = new AbortController(); rpcInFlight = controller;
     const timeout = setTimeout(() => controller.abort(), 4500);
     try {
       const response = await fetchImpl(httpUrl, {
@@ -254,10 +272,14 @@ export function createRadar({
       });
       if (!response.ok) throw new Error('HTTP ' + response.status);
       const body = await response.json();
-      if (!Number.isSafeInteger(body.result)) throw new Error(body.error?.message || 'Bad getSlot response');
-      currentSlot = body.result; rpcOk = true; rpcError = null; lastRpcAt = now();
-    } catch(e) { rpcOk = false; rpcError = String(e.message).slice(0,140); lastRpcAt = now(); }
-    finally { clearTimeout(timeout); }
+      if (!Number.isSafeInteger(body.result) || body.result < 0) throw new Error('Bad getSlot response');
+      if (stopped) return;
+      if (controller.signal.aborted) throw new Error('RPC health check timed out');
+      if (currentSlot !== null && body.result < currentSlot) throw new Error('RPC slot regressed');
+      if (currentSlot !== null && body.result > currentSlot) lastSlotAdvanceAt = now();
+      currentSlot = body.result; rpcOk = true; rpcError = null; lastRpcAt = now(); lastRpcSuccessAt = lastRpcAt;
+    } catch { if (!stopped) { rpcOk = false; rpcError = 'RPC health check failed'; lastRpcAt = now(); } }
+    finally { clearTimeout(timeout); if (rpcInFlight === controller) rpcInFlight = null; }
   }
   function assess(payload) {
     const result = assessPolicy(payload?.programIds, payload?.accounts, deny);
@@ -275,10 +297,17 @@ export function createRadar({
       return {...bucket, minute:offset};
     });
     const recent = [...events.values()].slice(-100).reverse();
+    const chainFresh = connected && subscribed && fresh(lastChainAt,FEED_TIMEOUT_MS);
+    const rpcFresh = rpcOk && fresh(lastRpcSuccessAt,RPC_FRESH_MS);
+    const slotAdvancing = rpcFresh && fresh(lastSlotAdvanceAt,RPC_FRESH_MS);
+    const feedStatus = stopped ? 'stopped' : !connected ? 'disconnected' : !subscribed ? 'subscribing' : !chainFresh || !rpcFresh || !slotAdvancing ? 'degraded' : 'live';
     return {
       product:'Hunter Radar', chain:'Solana', cluster:'mainnet-beta', mode:'REAL MAINNET — READ ONLY',
       sourceHost:rpcHost, connected, subscribed, rpcOk, currentSlot, lastRpcAt,
       lastEventAt, lastError, rpcError, gapCount, rejectedMessages,
+      feed:{status:feedStatus,chainFresh,rpcFresh,slotAdvancing,lastChainAt,lastRpcSuccessAt,lastSlotAdvanceAt,
+        reconnections,retryStreak,connectTimeoutMs:CONNECT_TIMEOUT_MS,subscriptionTimeoutMs:SUBSCRIPTION_TIMEOUT_MS,
+        observationTimeoutMs:FEED_TIMEOUT_MS,rpcFreshMs:RPC_FRESH_MS,coverage:'best-effort; never an authorization or complete-coverage signal'},
       messageSizes:{
         ...messageSizes, limitBytes:MAX_WS_MESSAGE_BYTES,
         boundsBytes:[...WS_SIZE_BOUNDS], counts:[...messageSizes.counts],
@@ -296,21 +325,26 @@ export function createRadar({
   }
   const startedAt = now();
   function start() {
+    if (started || stopped) return;
+    started = true;
     kaliSensor.start();
     connect(); void checkRpc();
     refreshTimer = setInterval(() => { void checkRpc(); },25000);
+    healthTimer = setInterval(checkFeed,1000);
   }
   function stop() {
     kaliSensor.stop();
     stopped = true; connected=false; subscribed=false;
     if (reconnectTimer) clearTimeout(reconnectTimer);
     if (refreshTimer) clearInterval(refreshTimer);
+    if (healthTimer) clearInterval(healthTimer);
+    if (rpcInFlight) rpcInFlight.abort();
     const socket = ws;
-    ws = null;
+    ws = null; retireActive = null;
     pending.clear(); subscriptions.clear();
-    if (socket) socket.close();
+    if (socket) { try { socket.close(); } catch {} }
   }
-  return {start,stop,snapshot,assess,checkRpc};
+  return {start,stop,snapshot,assess,checkRpc,checkFeed};
 }
 // Local access only: Basic credentials are never sent to a remote service.
 function createLocalAccess(env) {
