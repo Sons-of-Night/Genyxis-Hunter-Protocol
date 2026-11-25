@@ -208,7 +208,7 @@ export function createRadar({
         let message;
         try { message = JSON.parse(event.data); }
         catch { rejectedMessages++; gapCount++; return; }
-        if (!message || typeof message !== 'object' || Array.isArray(message)) { rejectedMessages++; return; }
+        if (!message || typeof message !== 'object' || Array.isArray(message)) { rejectedMessages++; gapCount++; return; }
         if (Number.isInteger(message.id) && pending.has(message.id)) {
           if (message.error) {
             const reason = message.error.message;
@@ -224,10 +224,14 @@ export function createRadar({
         const address = subscriptions.get(message.params?.subscription);
         // Ignore notifications outside our acknowledged subscriptions.
         if (address === undefined) return;
-        const observed = normalizeObservation(message, address, deny, now());
-        if (observed) {
-          lastEventAt = observed.time;
+        try {
+          const observed = normalizeObservation(message, address, deny, now());
+          if (!observed) { rejectedMessages++; gapCount++; return; }
           record(observed);
+          lastEventAt = observed.time;
+        } catch {
+          rejectedMessages++; gapCount++;
+          lastError = 'Invalid transaction observation';
         }
       });
       socket.addEventListener('error', () => { retire('WebSocket connection error'); });
