@@ -20,7 +20,7 @@ These tracks are related, but **Hunter Radar runs independently of the synthetic
 
 ## Hunter Radar — run locally
 
-**Requirements:** Linux (Ubuntu, Kali, or WSL) and **Node.js 22+**. Install the locked Solana SDK dependencies to run the withdrawal guard and its tests.
+**Requirements:** Linux (Ubuntu, Kali, or WSL) and **Node.js 22.13+**. Install the locked Solana SDK dependencies to run the withdrawal guard and its tests.
 
 ```bash
 git clone https://github.com/Sons-of-Night/Genyxis-Hunter-Protocol.git
@@ -93,7 +93,7 @@ npm start
 
 **Real sensor acceptance test:** [merged PR #3](https://github.com/Sons-of-Night/Genyxis-Hunter-Protocol/pull/3) introduces `npm run verify:suricata`, a controlled loopback capture check for Kali/Ubuntu. **The command is available on `main`.** Running it successfully on the intended host is still pending. Keep the Suricata loopback result separate from Solana mainnet stream validation.
 
-Radar's browser output omits raw packet data and source/destination IPs from parsed Suricata alerts. It must not infer that an intrusion alert identifies a malicious on-chain wallet, or that a reported alert was blocked. Cloudflare ingest, remote sensors, tenancy, authentication and managed retention are **not yet implemented**.
+Radar's browser output omits raw packet data and source/destination IPs from parsed Suricata alerts. It must not infer that an intrusion alert identifies a malicious on-chain wallet, or that a reported alert was blocked. Cloudflare ingest, remote sensors, tenancy, remote authentication and managed retention are **not yet implemented**. Local loopback access requires authentication.
 
 See [radar/README.md](radar/README.md) for detailed sensor setup, limitations and testing instructions.
 
