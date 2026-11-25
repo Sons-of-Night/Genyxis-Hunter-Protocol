@@ -67,3 +67,22 @@ test('Stopped Radar ignores delayed socket callbacks',()=>{
   assert.equal(radar.snapshot().subscribed,false);
   assert.equal(radar.snapshot().counters.observed,0);
 });
+
+test('Invalid notification payloads do not crash the feed or hide gaps',()=>{
+  const {socket,radar}=fixture();
+  try {
+    socket.emit('message',null);
+    const invalid=notification();
+    invalid.params.result.value.signature='invalid';
+    socket.emit('message',invalid);
+    // Construct a valid JSON frame with a deeply nested provider error without
+    // relying on JSON.stringify to create the deeply nested object.
+    const raw=JSON.stringify(notification()).replace('"err":null','"err":'+'['.repeat(20000)+'0'+']'.repeat(20000));
+    socket.dispatchEvent(new MessageEvent('message',{data:raw}));
+    assert.equal(radar.snapshot().rejectedMessages,3);
+    assert.equal(radar.snapshot().gapCount,3);
+    assert.equal(radar.snapshot().counters.observed,0);
+    socket.emit('message',notification());
+    assert.equal(radar.snapshot().counters.observed,1);
+  } finally {radar.stop();}
+});
