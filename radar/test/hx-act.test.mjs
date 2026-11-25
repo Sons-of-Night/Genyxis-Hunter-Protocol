@@ -21,10 +21,11 @@ function request(action='investigate-case',overrides={},presenter=holder){
   const claims={version:1,mode:modes[action],audience:'huntxr-test',asset:'owned-test-asset',
     action,requestHash,subjectKey:keyFingerprint(presenter.publicKey),
     nonce:randomBytes(32).toString('hex'),issuedAt:start,expiresAt:start+20000,...overrides};
+  const challenge=randomBytes(32).toString('hex');
   return {claims,issuerSignature:signature(issuer.privateKey,capabilityBytes(claims)),
-    holderKey:presenter.publicKey,holderSignature:signature(presenter.privateKey,holderProofBytes(claims)),
+    holderKey:presenter.publicKey,holderSignature:signature(presenter.privateKey,holderProofBytes(claims,challenge)),
     approvalSignature:signature(approver.privateKey,approvalBytes(claims)),
-    expected:{audience:claims.audience,asset:claims.asset,action:claims.action,requestHash:claims.requestHash}};
+    expected:{audience:claims.audience,asset:claims.asset,action:claims.action,requestHash:claims.requestHash,challenge}};
 }
 const denied=(v,r)=>assert.deepEqual(v.authorize(r),{authorized:false,mode:'GREEN',reason:'authorization-denied'});
 
@@ -43,8 +44,10 @@ test('Each action maps to its permitted mode and consumes exactly one nonce',()=
 test('A copied capability without its holder key and valid signature cannot authorize',()=>{
   const {verifier}=fixture(),r=request();
   denied(verifier,{...r,holderKey:stranger.publicKey});
-  denied(verifier,{...r,holderSignature:signature(stranger.privateKey,holderProofBytes(r.claims))});
+  denied(verifier,{...r,holderSignature:signature(stranger.privateKey,holderProofBytes(r.claims,r.expected.challenge))});
   denied(verifier,{...r,holderSignature:undefined});
+  denied(verifier,{...r,expected:{...r.expected,challenge:randomBytes(32).toString('hex')}});
+  denied(verifier,{...r,expected:{...r.expected,challenge:undefined}});
   assert.equal(verifier.authorize(r).authorized,true);
 });
 test('RED requires separate approval for exactly the signed capability',()=>{
