@@ -126,3 +126,13 @@ test('Missing state is never silently recreated and existing state cannot be rei
   rmSync(f.options.path);
   assert.throws(()=>f.open());
 });
+
+test('Detected audit integrity failure latches the live handle closed to decisions',t=>{
+  const f=fixture(t),a=f.open();
+  assert.equal(a.commitVerified(claims(),start),true);
+  const db=new DatabaseSync(f.options.path);
+  try{db.exec("UPDATE ledger SET payload='{}' WHERE seq=2");}finally{db.close();}
+  assert.throws(()=>a.verifyAudit());
+  assert.equal(a.commitVerified(claims(),start),false);
+  assert.throws(()=>a.emergencyHalt());
+});
