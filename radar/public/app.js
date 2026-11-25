@@ -131,6 +131,8 @@ function render(snapshot) {
   text('feedCount',snapshot.events.length+' recent');
   text('coverage','Session started '+new Date(snapshot.sessionStartedAt).toLocaleTimeString()+' • Coverage gaps: '+snapshot.gapCount);
   const warnings=[];
+  if(snapshot.intelligence?.status==='failed') warnings.push('Durable evidence recording FAILED. Do not rely on this session as a complete incident record.');
+  else if(snapshot.intelligence?.status!=='recording') warnings.push('Durable evidence archive is not active.');
   if(!connected) warnings.push('Live mainnet feed is not verified current. No protection or full coverage can be claimed.');
   if(snapshot.feed && !snapshot.feed.chainFresh) warnings.push('Current connection has no recent chain-wide observation.');
   if(snapshot.feed && !snapshot.feed.slotAdvancing) warnings.push('Recent RPC slot advancement has not been verified.');
