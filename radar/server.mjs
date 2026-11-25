@@ -8,6 +8,7 @@ import http from 'node:http';
 import {createHash, timingSafeEqual} from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createSuricataMonitor } from './kali/suricata.mjs';
+import {openEvidence} from './intelligence-core.mjs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -102,7 +103,23 @@ export function createRadar({
   const watch = addresses(env.HUNTER_RADAR_WATCH_ADDRESSES, MAX_WATCH);
   const deny = new Set(addresses(env.HUNTER_RADAR_DENY_ADDRESSES));
   const rpcHost = new URL(httpUrl).hostname;
-  const kaliSensor = createSuricataMonitor(env.HUNTER_RADAR_SURICATA_EVE_FILE,{now});
+  const evidencePath=env.HUNTER_RADAR_EVIDENCE_PATH;
+  const evidenceKey=env.HUNTER_RADAR_EVIDENCE_KEY;
+  if ((evidencePath!==undefined || evidenceKey!==undefined) && (!evidencePath || !/^[a-f0-9]{64}$/.test(evidenceKey??''))) throw Error('Evidence path and 32-byte hexadecimal key are required together');
+  const evidence=evidencePath?openEvidence({path:evidencePath,key:Buffer.from(evidenceKey,'hex')}):null;
+  let evidenceFailed=false;
+  function archive(fn){
+    if(!evidence||evidenceFailed||stopped) return;
+    try{fn(evidence);}catch{evidenceFailed=true;}
+  }
+  function evidenceSummary(){
+    if(!evidence) return {status:'not-configured'};
+    if(evidenceFailed||stopped) return {status:evidenceFailed?'failed':'stopped'};
+    try{return {status:'recording',...evidence.summary()};}catch{evidenceFailed=true;return {status:'failed'};}
+  }
+  const kaliSensor = createSuricataMonitor(env.HUNTER_RADAR_SURICATA_EVE_FILE,{now,
+    onAlert:event=>archive(store=>store.recordSensor(event)),
+    onGap:()=>archive(store=>store.recordGap('sensor-rotation-or-skip',now()))});
   let ws = null, stopped = false, connected = false, subscribed = false, lastEventAt = null;
   let rpcOk = false, currentSlot = null, lastRpcAt = null, rpcError = null;
   let lastError = null, reconnections = 0, gapCount = 0, reconnectTimer = null;
@@ -127,6 +144,7 @@ export function createRadar({
   const timeline = Array(TIMELINE_MINUTES);
 
   function record(observation) {
+    if(observation.policyMatches.length) archive(store=>store.recordSolana(observation));
     const {signature, watchedAddresses} = observation;
     const watched = watchedAddresses.length > 0;
     const alreadyWatched = seenSignatures.get(signature);
@@ -183,7 +201,7 @@ export function createRadar({
       const retire = (reason) => {
         if (!active()) return;
         ws = null; retireActive = null;
-        gapCount++;
+        noteGap(reason.includes('stale')?'stale-feed':reason.includes('subscription')?'subscription':'connection');
         connected = false; subscribed = false;
         pending.clear(); subscriptions.clear();
         if (reason) lastError = reason;
@@ -203,7 +221,7 @@ export function createRadar({
         if (!active() || !connected) return;
         if (typeof event.data !== 'string') {
           messageSizes.nonTextMessages++;
-          rejectedMessages++; gapCount++;
+          rejectedMessages++; noteGap('invalid-message');
           lastError = 'Unsupported WebSocket message type';
           return;
         }
@@ -211,14 +229,14 @@ export function createRadar({
         measureText(bytes);
         if (bytes > MAX_WS_MESSAGE_BYTES) {
           messageSizes.oversizedMessages++;
-          rejectedMessages++; gapCount++;
+          rejectedMessages++; noteGap('oversized-message');
           lastError = 'Oversized WebSocket message';
           return;
         }
         let message;
         try { message = JSON.parse(event.data); }
-        catch { rejectedMessages++; gapCount++; return; }
-        if (!message || typeof message !== 'object' || Array.isArray(message)) { rejectedMessages++; gapCount++; return; }
+        catch { rejectedMessages++; noteGap('invalid-message'); return; }
+        if (!message || typeof message !== 'object' || Array.isArray(message)) { rejectedMessages++; noteGap('invalid-message'); return; }
         if (Number.isInteger(message.id) && pending.has(message.id)) {
           if (message.error) {
             const reason = message.error.message;
@@ -236,18 +254,18 @@ export function createRadar({
         if (address === undefined) return;
         try {
           const observed = normalizeObservation(message, address, deny, now());
-          if (!observed) { rejectedMessages++; gapCount++; return; }
+          if (!observed) { rejectedMessages++; noteGap('invalid-message'); return; }
           record(observed);
           lastEventAt = observed.time;
           if (address === null && subscribed) { lastChainAt = observed.time; retryStreak = 0; }
         } catch {
-          rejectedMessages++; gapCount++;
+          rejectedMessages++; noteGap('invalid-message');
           lastError = 'Invalid transaction observation';
         }
       });
       socket.addEventListener('error', () => { retire('WebSocket connection error'); });
       socket.addEventListener('close', () => { retire('WebSocket disconnected'); });
-    } catch { lastError = 'WebSocket setup failed'; if (retireActive) retireActive(lastError); else { gapCount++; reconnect(); } }
+    } catch { lastError = 'WebSocket setup failed'; if (retireActive) retireActive(lastError); else { noteGap('connection'); reconnect(); } }
   }
   function reconnect() {
     if (stopped || reconnectTimer) return;
@@ -287,6 +305,7 @@ export function createRadar({
     if (result.decision === 'deny') denyRecommendations++;
     return result;
   }
+  function noteGap(reason){gapCount++;archive(store=>store.recordGap(reason,now()));}
   function snapshot() {
     const currentMinute = Math.floor(now() / MINUTE_MS);
     const buckets = Array.from({length:TIMELINE_MINUTES}, (_, i) => {
@@ -316,7 +335,7 @@ export function createRadar({
       completeness:'Best-effort live feed. Provider throttling, disconnects and retention limits may omit transactions.',
       scope:'All non-vote transaction logs received from selected mainnet RPC since process start; only configured policy matches are flagged.',
       watchCount:watch.length, watchAddresses:watch, denylistSize:deny.size,
-      sessionStartedAt:startedAt, kali:kaliSensor.snapshot(), counters:{
+      sessionStartedAt:startedAt, intelligence:evidenceSummary(), kali:kaliSensor.snapshot(), counters:{
         observed:totalObserved, failed:totalFailed, policyMatches:totalPolicyMatches,
         watchObserved:totalWatchObserved, policyChecks:checks, denyRecommendations
       },
@@ -334,6 +353,7 @@ export function createRadar({
   }
   function stop() {
     kaliSensor.stop();
+    if(evidence) evidence.close();
     stopped = true; connected=false; subscribed=false;
     if (reconnectTimer) clearTimeout(reconnectTimer);
     if (refreshTimer) clearInterval(refreshTimer);
