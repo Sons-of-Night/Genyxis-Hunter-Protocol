@@ -40,8 +40,9 @@ export function capabilityBytes(claims){
   const c=checkedClaims(claims);
   return Buffer.from(JSON.stringify(['huntxr:hx-act:capability:v1',...FIELDS.map(f=>c[f])]),'utf8');
 }
-export function holderProofBytes(claims){
-  return Buffer.from('huntxr:hx-act:holder:v1:'+sha256(capabilityBytes(claims)),'utf8');
+export function holderProofBytes(claims,challenge){
+  if(!hash(challenge)) fail();
+  return Buffer.from('huntxr:hx-act:holder:v1:'+sha256(capabilityBytes(claims))+':'+challenge,'utf8');
 }
 export function approvalBytes(claims){
   return Buffer.from('huntxr:hx-act:approval:v1:'+sha256(capabilityBytes(claims)),'utf8');
@@ -94,11 +95,12 @@ export function createVerifier({issuerKey,approverKey,audience,allowedScopes,rep
         if(!Number.isSafeInteger(time)||time<c.issuedAt||time>=c.expiresAt
           ||c.audience!==audience||c.audience!==expected?.audience
           ||c.asset!==expected?.asset||c.action!==expected?.action||c.requestHash!==expected?.requestHash
+          ||!hash(expected?.challenge)
           ||!scopes.has(JSON.stringify([c.asset,c.action]))) fail();
         const holder=key(holderKey),holderId=keyFingerprint(holder);
         if(holderId!==c.subjectKey||holderId===issuerId||holderId===approverId) fail();
         if(!validSignature(issuer,capabilityBytes(c),issuerSignature)
-          ||!validSignature(holder,holderProofBytes(c),holderSignature)) fail();
+          ||!validSignature(holder,holderProofBytes(c,expected.challenge),holderSignature)) fail();
         if(c.mode==='RED'&&!validSignature(approver,approvalBytes(c),approvalSignature)) fail();
         // Revocation provider must return an explicit boolean false; outage/unknown denies.
         if(isRevoked(c)!==false) fail();
