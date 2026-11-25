@@ -5,6 +5,7 @@
  * Requires Node.js >=22 for built-in WebSocket.
  */
 import http from 'node:http';
+import {createHash, timingSafeEqual} from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createSuricataMonitor } from './kali/suricata.mjs';
 import { dirname, join } from 'node:path';
@@ -18,6 +19,8 @@ const SIGNATURE_HISTORY_LIMIT = 65_536;
 const TIMELINE_MINUTES = 15;
 const MINUTE_MS = 60_000;
 const ASSESS_BODY_LIMIT = 8_192;
+export const MAX_WS_MESSAGE_BYTES = 256 * 1024;
+const WS_SIZE_BOUNDS = [1024,4096,16384,65536,131072,MAX_WS_MESSAGE_BYTES];
 const LOCAL_HOST = /^(?:localhost|127\.0\.0\.1)(?::([1-9][0-9]{0,4}))?$/i;
 
 function trustedLocalRequest(req) {
@@ -99,6 +102,15 @@ export function createRadar({
   let ws = null, stopped = false, connected = false, subscribed = false, lastEventAt = null;
   let rpcOk = false, currentSlot = null, lastRpcAt = null, rpcError = null;
   let lastError = null, reconnections = 0, gapCount = 0, reconnectTimer = null;
+  let rejectedMessages = 0;
+  const messageSizes = {textMessages:0,textBytes:0,maxTextBytes:0,oversizedMessages:0,nonTextMessages:0,counts:Array(WS_SIZE_BOUNDS.length+1).fill(0)};
+  function measureText(bytes) {
+    messageSizes.textMessages++;
+    messageSizes.textBytes += bytes;
+    messageSizes.maxTextBytes = Math.max(messageSizes.maxTextBytes,bytes);
+    const index = WS_SIZE_BOUNDS.findIndex(bound=>bytes<=bound);
+    messageSizes.counts[index===-1?WS_SIZE_BOUNDS.length:index]++;
+  }
   let refreshTimer = null, totalObserved = 0, totalFailed = 0, totalPolicyMatches = 0;
   let totalWatchObserved = 0, checks = 0, denyRecommendations = 0, seq = 0;
   const events = new Map(), pending = new Map(), subscriptions = new Map();
@@ -144,10 +156,10 @@ export function createRadar({
     }
     if (watched) totalWatchObserved++;
   }
-  function sendSubscription(filter, watchAddress = null) {
+  function sendSubscription(socket, filter, watchAddress = null) {
     const id = ++seq;
     pending.set(id, watchAddress);
-    ws.send(JSON.stringify({
+    socket.send(JSON.stringify({
       jsonrpc: '2.0', id, method: 'logsSubscribe',
       params: [filter, {commitment: 'confirmed'}]
     }));
@@ -156,17 +168,47 @@ export function createRadar({
     if (stopped) return;
     pending.clear(); subscriptions.clear(); subscribed = false; connected = false;
     try {
-      ws = webSocketFactory(wsUrl);
-      ws.addEventListener('open', () => {
+      const socket = webSocketFactory(wsUrl);
+      ws = socket;
+      const active = () => !stopped && ws === socket;
+      const retire = (reason) => {
+        if (!active()) return;
+        ws = null;
+        if (connected) gapCount++;
+        connected = false; subscribed = false;
+        pending.clear(); subscriptions.clear();
+        if (reason) lastError = reason;
+        try { socket.close(); } catch { /* Already retired. */ }
+        reconnect();
+      };
+      socket.addEventListener('open', () => {
+        if (!active() || connected) return;
         connected = true; lastError = null;
-        sendSubscription('all'); // Mainnet-wide non-vote transaction logs, subject to provider limits.
-        for (const address of watch) sendSubscription({mentions:[address]}, address);
+        try {
+          sendSubscription(socket, 'all'); // Mainnet-wide non-vote transaction logs, subject to provider limits.
+          for (const address of watch) sendSubscription(socket, {mentions:[address]}, address);
+        } catch { retire('WebSocket subscription send failed'); }
       });
-      ws.addEventListener('message', event => {
+      socket.addEventListener('message', event => {
+        if (!active() || !connected) return;
+        if (typeof event.data !== 'string') {
+          messageSizes.nonTextMessages++;
+          rejectedMessages++; gapCount++;
+          lastError = 'Unsupported WebSocket message type';
+          return;
+        }
+        const bytes = Buffer.byteLength(event.data,'utf8');
+        measureText(bytes);
+        if (bytes > MAX_WS_MESSAGE_BYTES) {
+          messageSizes.oversizedMessages++;
+          rejectedMessages++; gapCount++;
+          lastError = 'Oversized WebSocket message';
+          return;
+        }
         let message;
-        try { message = JSON.parse(typeof event.data === 'string' ? event.data : String(event.data)); }
-        catch { return; }
-        if (!message || typeof message !== 'object') return;
+        try { message = JSON.parse(event.data); }
+        catch { rejectedMessages++; gapCount++; return; }
+        if (!message || typeof message !== 'object' || Array.isArray(message)) { rejectedMessages++; return; }
         if (Number.isInteger(message.id) && pending.has(message.id)) {
           if (message.error) {
             const reason = message.error.message;
@@ -188,12 +230,8 @@ export function createRadar({
           record(observed);
         }
       });
-      ws.addEventListener('error', () => { lastError = 'WebSocket connection error'; });
-      ws.addEventListener('close', () => {
-        if (stopped) return;
-        if (connected) gapCount++; // explicitly disclose gaps instead of claiming comprehensive coverage
-        connected = false; subscribed = false; reconnect();
-      });
+      socket.addEventListener('error', () => { retire('WebSocket connection error'); });
+      socket.addEventListener('close', () => { retire('WebSocket disconnected'); });
     } catch(error) { lastError = String(error.message).slice(0,140); reconnect(); }
   }
   function reconnect() {
@@ -236,7 +274,12 @@ export function createRadar({
     return {
       product:'Hunter Radar', chain:'Solana', cluster:'mainnet-beta', mode:'REAL MAINNET — READ ONLY',
       sourceHost:rpcHost, connected, subscribed, rpcOk, currentSlot, lastRpcAt,
-      lastEventAt, lastError, rpcError, gapCount,
+      lastEventAt, lastError, rpcError, gapCount, rejectedMessages,
+      messageSizes:{
+        ...messageSizes, limitBytes:MAX_WS_MESSAGE_BYTES,
+        boundsBytes:[...WS_SIZE_BOUNDS], counts:[...messageSizes.counts],
+        scope:'Session totals for active socket text messages before parsing; final bucket exceeds limit.'
+      },
       completeness:'Best-effort live feed. Provider throttling, disconnects and retention limits may omit transactions.',
       scope:'All non-vote transaction logs received from selected mainnet RPC since process start; only configured policy matches are flagged.',
       watchCount:watch.length, watchAddresses:watch, denylistSize:deny.size,
@@ -258,11 +301,38 @@ export function createRadar({
     stopped = true; connected=false; subscribed=false;
     if (reconnectTimer) clearTimeout(reconnectTimer);
     if (refreshTimer) clearInterval(refreshTimer);
-    if (ws) ws.close();
+    const socket = ws;
+    ws = null;
+    pending.clear(); subscriptions.clear();
+    if (socket) socket.close();
   }
   return {start,stop,snapshot,assess,checkRpc};
 }
-export function createServer(radar) {
+// Local access only: Basic credentials are never sent to a remote service.
+function createLocalAccess(env) {
+  const operator = env.HUNTER_RADAR_OPERATOR_TOKEN;
+  const viewer = env.HUNTER_RADAR_VIEWER_TOKEN;
+  const valid = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+  if (!valid(operator) || (viewer !== undefined && (!valid(viewer) || viewer === operator))) {
+    throw new Error('Configure a 64-character lowercase hex operator token and, optionally, a distinct viewer token');
+  }
+  const digest = value => createHash('sha256').update(value).digest();
+  const credential = (role, token) => digest(Buffer.from(role+':'+token,'utf8').toString('base64'));
+  const operatorDigest = credential('operator',operator);
+  const viewerDigest = viewer === undefined ? null : credential('viewer',viewer);
+  return header => {
+    if (typeof header !== 'string' || header.length > 256) return null;
+    const match = /^Basic ([A-Za-z0-9+/]+={0,2})$/i.exec(header);
+    if (!match) return null;
+    const supplied = digest(match[1]);
+    const isOperator = timingSafeEqual(operatorDigest,supplied);
+    const isViewer = viewerDigest !== null && timingSafeEqual(viewerDigest,supplied);
+    return isOperator ? 'operator' : isViewer ? 'viewer' : null;
+  };
+}
+
+export function createServer(radar, {env=process.env}={}) {
+  const authorize = createLocalAccess(env);
   const files = {'/':'index.html','/index.html':'index.html','/app.js':'app.js','/styles.css':'styles.css'};
   const server = http.createServer(async (req,res) => {
     const security = {
@@ -280,6 +350,18 @@ export function createServer(radar) {
     let url;
     try { url = new URL(req.url,'http://localhost'); }
     catch { res.writeHead(400);res.end('Invalid request target');return; }
+    // Do not trust forwarded headers or expose this local-only service via a proxy.
+    if (!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) {
+      res.writeHead(403,{'Connection':'close'});res.end('Loopback access required');return;
+    }
+    const role = authorize(req.headers.authorization);
+    if (!role) {
+      res.writeHead(401,{'WWW-Authenticate':'Basic realm="Huntxr local", charset="UTF-8"','Connection':'close'});
+      res.end('Authentication required');return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/assess' && role !== 'operator') {
+      res.writeHead(403,{'Connection':'close'});res.end('Operator permission required');return;
+    }
     if (req.method === 'GET' && (url.pathname === '/api/snapshot' || url.pathname === '/api/health')) {
       res.writeHead(200,{'Content-Type':'application/json; charset=utf-8'});
       res.end(JSON.stringify(radar.snapshot())); return;
