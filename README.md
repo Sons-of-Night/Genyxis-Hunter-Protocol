@@ -30,13 +30,17 @@ node --version
 npm ci
 npm test
 
+# Load the provisioned random operator token without echoing it.
+read -rsp 'Huntxr operator token: ' HUNTER_RADAR_OPERATOR_TOKEN; echo
+export HUNTER_RADAR_OPERATOR_TOKEN
+
 export HUNTER_RADAR_RPC_HTTP='https://api.mainnet.solana.com'
 export HUNTER_RADAR_RPC_WS='wss://api.mainnet.solana.com'
 
 npm start
 ```
 
-Open **http://127.0.0.1:4190** on the same computer. Radar binds to loopback by default. Visit **http://127.0.0.1:4190/api/health** to view raw health data. A useful live-feed check is `rpcOk: true`, an integer `currentSlot`, `subscribed: true` and a rising `counters.observed` value as transactions arrive. Press **Ctrl+C** to stop.
+Open **http://127.0.0.1:4190** on the same computer. Radar binds only to loopback. Authenticate as `operator` with the provisioned token; see [local credential provisioning](radar/README.md#local-operator-authentication). Visit **http://127.0.0.1:4190/api/health** to view raw health data. A useful live-feed check is `rpcOk: true`, an integer `currentSlot`, `subscribed: true` and a rising `counters.observed` value as transactions arrive. Press **Ctrl+C** to stop.
 
 The public mainnet endpoints may rate-limit or reject broad `logsSubscribe` requests. **A failed connection, low count, or gap is not evidence of an empty or safe network.** Commercial monitoring needs a suitable streaming/indexing provider, durable storage, gap recovery and finalized-state reconciliation.
 
@@ -44,6 +48,8 @@ The public mainnet endpoints may rate-limit or reject broad `logsSubscribe` requ
 
 | Variable | Purpose |
 | --- | --- |
+| `HUNTER_RADAR_OPERATOR_TOKEN` | Required protected 32-byte random token (64 lowercase hexadecimal characters) |
+| `HUNTER_RADAR_VIEWER_TOKEN` | Optional distinct read-only token in the same format |
 | `HUNTER_RADAR_RPC_HTTP` | Solana mainnet HTTPS JSON-RPC endpoint |
 | `HUNTER_RADAR_RPC_WS` | Solana mainnet secure WebSocket endpoint |
 | `HUNTER_RADAR_WATCH_ADDRESSES` | Comma-separated public Solana addresses to watch; maximum 12 |
@@ -57,7 +63,7 @@ Only use **public wallet/program addresses**. Never enter seed phrases, private 
 A participating wallet, dApp or transaction service can ask Hunter for a policy recommendation:
 
 ```bash
-curl -sS -X POST http://127.0.0.1:4190/api/assess \
+curl -sS --user operator -X POST http://127.0.0.1:4190/api/assess \
   -H 'Content-Type: application/json' \
   -d '{"programIds":["11111111111111111111111111111111"],"accounts":[]}'
 ```
@@ -66,7 +72,7 @@ curl -sS -X POST http://127.0.0.1:4190/api/assess \
 - `decision: "no_match"` means there was no configured match. **It does not mean safe.**
 - For enforcement at the signing boundary, integrate the [Huntxr withdrawal guard](radar/README.md#protected-sol-withdrawal-signing) in the signing service.
 
-Do not expose the unauthenticated local API directly to the internet.
+Do not expose the local authenticated API through a remote proxy, tunnel, or network listener. Remote access requires independent qualification.
 
 ## Kali-inspired security: first real sensor
 
