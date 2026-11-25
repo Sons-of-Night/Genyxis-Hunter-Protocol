@@ -44,7 +44,9 @@ async function verify(signal) {
     webSocketFactory:() => Object.assign(new EventTarget(), {close() {}}),
     fetchImpl:async () => new Response(null, {status:503})
   });
-  const server = createServer(radar);
+  const token = randomBytes(32).toString('hex');
+  const authorization = 'Basic '+Buffer.from('operator:'+token).toString('base64');
+  const server = createServer(radar,{env:{HUNTER_RADAR_OPERATOR_TOKEN:token}});
   let sensor, sensorDone, sensorExit, passed = false;
   try {
     await writeFile(eve, '', {mode:0o600});
@@ -60,7 +62,7 @@ async function verify(signal) {
     await once(server, 'listening', {signal});
     const endpoint = `http://${HOST}:${server.address().port}/api/snapshot`;
     async function snapshot() {
-      const response = await fetch(endpoint, {signal:AbortSignal.any([signal, AbortSignal.timeout(2000)])});
+      const response = await fetch(endpoint, {headers:{Authorization:authorization},signal:AbortSignal.any([signal, AbortSignal.timeout(2000)])});
       assert.equal(response.status, 200, 'Radar snapshot endpoint must return HTTP 200.');
       return response.json();
     }

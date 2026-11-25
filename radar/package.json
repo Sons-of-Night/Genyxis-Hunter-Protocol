@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Solana mainnet security telemetry and protected withdrawal signing",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13.0"
   },
   "scripts": {
     "start": "node server.mjs",

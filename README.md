@@ -12,7 +12,7 @@ Hunter is a Genyxis initiative to help Solana developers and operators **observe
 | --- | --- | --- |
 | **Hunter Radar** (`radar/`) | Reads Solana mainnet transaction logs, displays live activity and slot health, offers a local pre-sign policy API, and ingests Suricata EVE alerts | Implemented development foundation; target-host and live-feed verification still needed |
 | **Huntxr withdrawal guard** (`radar/withdrawal-guard.mjs`) | Requires independent approval, a permitted destination and amount, mainnet simulation, and a fresh threat verdict before signing a protected native SOL withdrawal | Signer-side library with automated tests. Live integration requires an isolated signing adapter and threat-screening credentials. |
-| **Kali / Suricata sensor** (`radar/kali/`) | Reads newly appended EVE JSON intrusion alerts from a locally authorized sensor and presents sanitized alert metadata | Integration implemented; real loopback capture verification is in [draft PR #3](https://github.com/Sons-of-Night/Genyxis-Hunter-Protocol/pull/3) |
+| **Kali / Suricata sensor** (`radar/kali/`) | Reads newly appended EVE JSON intrusion alerts from a locally authorized sensor and presents sanitized alert metadata | Integration implemented; real loopback capture verification is in [merged PR #3](https://github.com/Sons-of-Night/Genyxis-Hunter-Protocol/pull/3) |
 | **Hunter Guard** (`program/`) | Anchor/Solana program prototype that requires issuer authorization and records one claim receipt per campaign and claimant | Isolated synthetic-rewards proof of concept; not the Radar product |
 | **Offline / chain labs** (`lab/`, `chain-lab/`) | Test authorization, signing, expiry and replay-resistance assumptions | Fixtures and test harness supplied; native Solana SBF/LiteSVM execution must be verified on a configured host |
 
@@ -20,7 +20,7 @@ These tracks are related, but **Hunter Radar runs independently of the synthetic
 
 ## Hunter Radar — run locally
 
-**Requirements:** Linux (Ubuntu, Kali, or WSL) and **Node.js 22+**. Install the locked Solana SDK dependencies to run the withdrawal guard and its tests.
+**Requirements:** Linux (Ubuntu, Kali, or WSL) and **Node.js 22.13+**. Install the locked Solana SDK dependencies to run the withdrawal guard and its tests.
 
 ```bash
 git clone https://github.com/Sons-of-Night/Genyxis-Hunter-Protocol.git
@@ -30,13 +30,17 @@ node --version
 npm ci
 npm test
 
+# Load the provisioned random operator token without echoing it.
+read -rsp 'Huntxr operator token: ' HUNTER_RADAR_OPERATOR_TOKEN; echo
+export HUNTER_RADAR_OPERATOR_TOKEN
+
 export HUNTER_RADAR_RPC_HTTP='https://api.mainnet.solana.com'
 export HUNTER_RADAR_RPC_WS='wss://api.mainnet.solana.com'
 
 npm start
 ```
 
-Open **http://127.0.0.1:4190** on the same computer. Radar binds to loopback by default. Visit **http://127.0.0.1:4190/api/health** to view raw health data. A useful live-feed check is `rpcOk: true`, an integer `currentSlot`, `subscribed: true` and a rising `counters.observed` value as transactions arrive. Press **Ctrl+C** to stop.
+Open **http://127.0.0.1:4190** on the same computer. Radar binds only to loopback. Authenticate as `operator` with the provisioned token; see [local credential provisioning](radar/README.md#local-operator-authentication). Visit **http://127.0.0.1:4190/api/health** to view raw health data. A useful live-feed check is `rpcOk: true`, an integer `currentSlot`, `subscribed: true` and a rising `counters.observed` value as transactions arrive. Press **Ctrl+C** to stop.
 
 The public mainnet endpoints may rate-limit or reject broad `logsSubscribe` requests. **A failed connection, low count, or gap is not evidence of an empty or safe network.** Commercial monitoring needs a suitable streaming/indexing provider, durable storage, gap recovery and finalized-state reconciliation.
 
@@ -44,6 +48,8 @@ The public mainnet endpoints may rate-limit or reject broad `logsSubscribe` requ
 
 | Variable | Purpose |
 | --- | --- |
+| `HUNTER_RADAR_OPERATOR_TOKEN` | Required protected 32-byte random token (64 lowercase hexadecimal characters) |
+| `HUNTER_RADAR_VIEWER_TOKEN` | Optional distinct read-only token in the same format |
 | `HUNTER_RADAR_RPC_HTTP` | Solana mainnet HTTPS JSON-RPC endpoint |
 | `HUNTER_RADAR_RPC_WS` | Solana mainnet secure WebSocket endpoint |
 | `HUNTER_RADAR_WATCH_ADDRESSES` | Comma-separated public Solana addresses to watch; maximum 12 |
@@ -57,7 +63,7 @@ Only use **public wallet/program addresses**. Never enter seed phrases, private 
 A participating wallet, dApp or transaction service can ask Hunter for a policy recommendation:
 
 ```bash
-curl -sS -X POST http://127.0.0.1:4190/api/assess \
+curl -sS --user operator -X POST http://127.0.0.1:4190/api/assess \
   -H 'Content-Type: application/json' \
   -d '{"programIds":["11111111111111111111111111111111"],"accounts":[]}'
 ```
@@ -66,7 +72,7 @@ curl -sS -X POST http://127.0.0.1:4190/api/assess \
 - `decision: "no_match"` means there was no configured match. **It does not mean safe.**
 - For enforcement at the signing boundary, integrate the [Huntxr withdrawal guard](radar/README.md#protected-sol-withdrawal-signing) in the signing service.
 
-Do not expose the unauthenticated local API directly to the internet.
+Do not expose the local authenticated API through a remote proxy, tunnel, or network listener. Remote access requires independent qualification.
 
 ## Kali-inspired security: first real sensor
 
@@ -85,9 +91,9 @@ npm start
 4. Open the **Kali Sensors** view. Only alerts appended after the file follower starts are counted. Sensor errors and skipped/rotated log gaps must be treated as reduced coverage.
 5. Test the parser with `npm test` or `node --test test/suricata.test.mjs`.
 
-**Real sensor acceptance test:** [draft PR #3](https://github.com/Sons-of-Night/Genyxis-Hunter-Protocol/pull/3) introduces `npm run verify:suricata`, a controlled loopback capture check for Kali/Ubuntu. **That command is not on `main` until the PR is merged.** Running it successfully on the intended host is still pending. Keep the Suricata loopback result separate from Solana mainnet stream validation.
+**Real sensor acceptance test:** [merged PR #3](https://github.com/Sons-of-Night/Genyxis-Hunter-Protocol/pull/3) introduces `npm run verify:suricata`, a controlled loopback capture check for Kali/Ubuntu. **The command is available on `main`.** Running it successfully on the intended host is still pending. Keep the Suricata loopback result separate from Solana mainnet stream validation.
 
-Radar's browser output omits raw packet data and source/destination IPs from parsed Suricata alerts. It must not infer that an intrusion alert identifies a malicious on-chain wallet, or that a reported alert was blocked. Cloudflare ingest, remote sensors, tenancy, authentication and managed retention are **not yet implemented**.
+Radar's browser output omits raw packet data and source/destination IPs from parsed Suricata alerts. It must not infer that an intrusion alert identifies a malicious on-chain wallet, or that a reported alert was blocked. Cloudflare ingest, remote sensors, tenancy, remote authentication and managed retention are **not yet implemented**. Local loopback access requires authentication.
 
 See [radar/README.md](radar/README.md) for detailed sensor setup, limitations and testing instructions.
 

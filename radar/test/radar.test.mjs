@@ -5,6 +5,12 @@ import {request} from 'node:http';
 import {connect} from 'node:net';
 import {assessPolicy, normalizeObservation, createRadar, createServer} from '../server.mjs';
 
+const authEnv={HUNTER_RADAR_OPERATOR_TOKEN:'a'.repeat(64),HUNTER_RADAR_VIEWER_TOKEN:'b'.repeat(64)};
+const operatorAuth='Basic '+Buffer.from('operator:'+authEnv.HUNTER_RADAR_OPERATOR_TOKEN).toString('base64');
+const viewerAuth='Basic '+Buffer.from('viewer:'+authEnv.HUNTER_RADAR_VIEWER_TOKEN).toString('base64');
+const localServer=radar=>createServer(radar,{env:authEnv});
+const localFetch=(url,options={})=>fetch(url,{...options,headers:{...options.headers,Authorization:operatorAuth}});
+
 const A='11111111111111111111111111111111';
 const B='TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
 const SIG='5'.repeat(88);
@@ -123,23 +129,23 @@ test('Real input pipeline deduplicates mainnet stream and targeted-watch events'
     const denied=radar.assess({programIds:[B],accounts:[]});
     assert.equal(denied.decision,'deny');
     assert.equal(radar.snapshot().counters.denyRecommendations,1);
-    const server=createServer(radar);
+    const server=localServer(radar);
     await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
     try {
       const base='http://127.0.0.1:'+server.address().port;
-      const response=await fetch(base+'/api/snapshot');
+      const response=await localFetch(base+'/api/snapshot');
       assert.equal(response.status,200);
       assert.equal((await response.json()).cluster,'mainnet-beta');
-      const attempt=await fetch(base+'/api/assess',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({programIds:[B],accounts:[]})});
+      const attempt=await localFetch(base+'/api/assess',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({programIds:[B],accounts:[]})});
       assert.equal((await attempt.json()).decision,'deny');
-      assert.equal((await fetch(base+'/missing')).status,404);
+      assert.equal((await localFetch(base+'/missing')).status,404);
     } finally {await new Promise(resolve=>server.close(resolve));}
   }finally{radar.stop();}
 });
 
 test('Policy API survives an interrupted upload and handles its full supported body size', {timeout:5000}, async()=>{
   const radar = createRadar({env:{HUNTER_RADAR_DENY_ADDRESSES:B}});
-  const server = createServer(radar);
+  const server = localServer(radar);
   server.listen(0,'127.0.0.1');
   await once(server,'listening');
   const {port} = server.address();
@@ -148,13 +154,13 @@ test('Policy API survives an interrupted upload and handles its full supported b
   try {
     await once(client,'connect');
     const incoming = once(server,'request');
-    client.write(`POST /api/assess HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{`);
+    client.write(`POST /api/assess HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nContent-Type: application/json\r\nAuthorization: ${operatorAuth}\r\nContent-Length: 100\r\n\r\n{`);
     const [req] = await incoming;
     const aborted = once(req,'aborted');
     client.destroy();
     await aborted;
 
-    const post = body=>fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body});
+    const post = body=>localFetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body});
     assert.equal((await post('{')).status,400);
     // This is fewer than 8192 characters, but more than 8192 UTF-8 bytes.
     assert.equal((await post(JSON.stringify('é'.repeat(4096)))).status,413);
@@ -163,7 +169,7 @@ test('Policy API survives an interrupted upload and handles its full supported b
     assert.equal(response.status,200);
     assert.equal((await response.json()).decision,'deny');
     assert.equal(radar.snapshot().counters.policyChecks,1);
-    assert.equal((await fetch(`http://127.0.0.1:${port}/api/health`)).status,200);
+    assert.equal((await localFetch(`http://127.0.0.1:${port}/api/health`)).status,200);
   } finally {
     client.destroy();
     await new Promise(resolve=>server.close(resolve));
@@ -171,12 +177,12 @@ test('Policy API survives an interrupted upload and handles its full supported b
 });
 
 test('Loopback API rejects a non-local Host and survives an invalid request target',async()=>{
-  const server = createServer(createRadar({env:{}}));
+  const server = localServer(createRadar({env:{}}));
   server.listen(0,'127.0.0.1');
   await once(server,'listening');
   const {port} = server.address();
   const status = (path,host)=>new Promise((resolve,reject)=>{
-    const req = request({hostname:'127.0.0.1',port,path,headers:{host}},res=>{
+    const req = request({hostname:'127.0.0.1',port,path,headers:{host,Authorization:operatorAuth}},res=>{
       res.resume();
       resolve(res.statusCode);
     });
@@ -192,11 +198,11 @@ test('Loopback API rejects a non-local Host and survives an invalid request targ
 
 test('Local HTTP boundary rejects rebinding, cross-site access and non-JSON policy requests', async()=>{
   const radar = {snapshot:()=>({status:'local'}),assess:()=>({decision:'no_match'})};
-  const server=createServer(radar);
+  const server=localServer(radar);
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   const port=server.address().port;
   const status=({path='/api/snapshot',method='GET',headers={},body}={})=>new Promise((resolve,reject)=>{
-    const req=request({hostname:'127.0.0.1',port,path,method,headers},res=>{
+    const req=request({hostname:'127.0.0.1',port,path,method,headers:{Authorization:operatorAuth,...headers}},res=>{
       res.resume();res.on('end',()=>resolve(res.statusCode));res.on('error',reject);
     });
     req.on('error',reject);req.end(body);
@@ -212,5 +218,28 @@ test('Local HTTP boundary rejects rebinding, cross-site access and non-JSON poli
     assert.equal(await status({path:'/api/assess',method:'POST',body,headers:{'Content-Type':'application/json'}}),200);
     assert.equal(await status({path:'/api/assess',method:'POST',body,headers:{'Content-Type':'text/plain'}}),415);
     assert.equal(await status({path:'/api/assess',method:'POST',body:'x'.repeat(8193),headers:{'Content-Type':'application/json'}}),413);
+  } finally {await new Promise(resolve=>server.close(resolve));}
+});
+
+
+test('Local access fails closed and viewer cannot execute policy assessment',async()=>{
+  const radar=createRadar({env:{}});
+  assert.throws(()=>createServer(radar,{env:{}}),/operator token/);
+  assert.throws(()=>createServer(radar,{env:{...authEnv,HUNTER_RADAR_VIEWER_TOKEN:authEnv.HUNTER_RADAR_OPERATOR_TOKEN}}),/distinct viewer/);
+  const server=localServer(radar);
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const base='http://127.0.0.1:'+server.address().port;
+  const get=(path,authorization)=>fetch(base+path,{headers:authorization?{Authorization:authorization}:{}});
+  const assess=authorization=>fetch(base+'/api/assess',{method:'POST',headers:{Authorization:authorization,'Content-Type':'application/json'},body:JSON.stringify({programIds:[],accounts:[]})});
+  try {
+    const denied=await get('/api/snapshot');
+    assert.equal(denied.status,401);
+    assert.match(denied.headers.get('www-authenticate'),/^Basic /);
+    assert.equal((await get('/api/health','Bearer invalid')).status,401);
+    assert.equal((await get('/','Basic invalid')).status,401);
+    assert.equal((await get('/api/snapshot',viewerAuth)).status,200);
+    assert.equal((await get('/api/health',operatorAuth)).status,200);
+    assert.equal((await assess(viewerAuth)).status,403);
+    assert.equal((await assess(operatorAuth)).status,200);
   } finally {await new Promise(resolve=>server.close(resolve));}
 });

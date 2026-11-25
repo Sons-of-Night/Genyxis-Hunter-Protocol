@@ -15,7 +15,7 @@ Hunter Radar is a separate Solana security dashboard in Genyxis Hunter Protocol.
 
 ## Start on real Solana mainnet
 
-Node.js 22 or later required. From the repository root:
+Node.js 22.13 or later required. From the repository root:
 
     cd radar
     node --version
@@ -35,6 +35,23 @@ Open http://127.0.0.1:4190 from the host computer. Radar binds only to 127.0.0.1
 
 The public Solana endpoints may reject or throttle high-volume stream requests; for sustained commercial use, configure a paid mainnet-capable RPC provider. Errors or unavailable coverage are displayed as such, never replaced by simulated data.
 
+## Local operator authentication
+
+Before starting Radar, provision a high-entropy 32-byte random secret encoded as 64 lowercase hexadecimal characters through the host's protected secret store. Set `HUNTER_RADAR_OPERATOR_TOKEN` in the service environment. Optionally provision a different secret as `HUNTER_RADAR_VIEWER_TOKEN`. For a temporary interactive Bash launch, read the provisioned operator secret without echoing it:
+
+```bash
+read -rsp 'Huntxr operator token: ' HUNTER_RADAR_OPERATOR_TOKEN; echo
+export HUNTER_RADAR_OPERATOR_TOKEN
+node server.mjs
+unset HUNTER_RADAR_OPERATOR_TOKEN
+```
+
+Generate secrets using a cryptographically secure generator (32 random bytes); never use a sample value or a human password. Do not put secrets in repository files, URLs, browser JavaScript, screenshots, shell command arguments or logs. Use a dedicated service account and restrict access to its environment.
+
+Open the loopback dashboard in the browser and authenticate using username `operator` or `viewer` and the corresponding token as the password. Operator can read telemetry and submit policy assessments; viewer can only read. All HTTP routes require credentials. Missing/invalid configuration prevents startup, invalid credentials return 401, and viewer policy requests return 403. API clients use HTTP Basic authentication; credentials should be supplied by the client's protected credential store. For example, curl can prompt for the token interactively with `--user operator`.
+
+This is a local single-host credential boundary only. HTTP Basic does not encrypt traffic, has no independent session expiration or per-user identity, and browser credential caching may persist until the browser session is closed. Rotate secrets by replacing the protected environment configuration and restarting the service. Do not expose Radar via Cloudflare, reverse proxy, port forwarding, LAN listener or any remote tunnel. Local malicious software or a compromised operating-system account is outside this control's trust boundary. Remote authentication, secure sessions, rate limiting, audit records and tenancy are separate release gates.
+
 ## Pre-sign assessment
 
 POST http://127.0.0.1:4190/api/assess
@@ -42,7 +59,7 @@ Content-Type: application/json
 
     {"programIds":["11111111111111111111111111111111"],"accounts":[]}
 
-Returns decision=deny only for an address on the configured denylist; otherwise decision=no_match. No_match does NOT prove that the transaction is safe. This endpoint does not simulate, sign, submit or stop a transaction. A customer's wallet or dApp must integrate and honor its decision to provide preventive action. Do not directly expose this unauthenticated loopback-only prototype to the internet.
+Returns decision=deny only for an address on the configured denylist; otherwise decision=no_match. No_match does NOT prove that the transaction is safe. This endpoint does not simulate, sign, submit or stop a transaction. A customer's wallet or dApp must integrate and honor its decision to provide preventive action. Operator authentication is required; do not expose this loopback-only prototype to any remote network.
 
 Send up to 64 addresses in each array and keep the UTF-8 JSON body within 8 KiB. Requests larger than 8 KiB receive HTTP 413. Use a loopback hostname or address in the request URL.
 
@@ -139,7 +156,7 @@ The backend deliberately excludes source/destination IP addresses, raw payloads 
 
 ## Validate the first sensor on Kali or Ubuntu
 
-Run this on a Genyxis-owned or explicitly authorized Kali/Ubuntu host with Node.js 22 or newer, npm, and Suricata. Check prerequisites from the `radar` directory:
+Run this on a Genyxis-owned or explicitly authorized Kali/Ubuntu host with Node.js 22.13 or newer, npm, and Suricata. Check prerequisites from the `radar` directory:
 
     node --version
     suricata -V
@@ -170,4 +187,4 @@ The tests use synthetic fixtures to validate the parser and API. The running pro
 
 The Radar HTTP listener remains loopback-only. A Host matching the actual local listener, same-origin browser requests, and JSON policy submissions are required. It rejects DNS-rebinding hosts, cross-site requests and mismatched ports, and adds bounded HTTP request/header lifetimes and restrictive browser headers. The policy body limit remains **8 KiB** (not 4 KiB) to preserve the documented 64+64 address contract and interrupted-upload handling from PR #4.
 
-The boundary has deterministic regression tests in `npm test`; loopback controls are **not** authentication. Do not forward this port or expose it via a public reverse proxy or Cloudflare Tunnel without a separate authenticated, authorized service boundary. Live host and network sensor verification are still required.
+The boundary has deterministic regression tests in `npm test`; loopback Host/origin checks alone are **not** authentication; the separate credential gate is mandatory. Do not forward this port or expose it via a public reverse proxy or Cloudflare Tunnel without a separate authenticated, authorized service boundary. Live host and network sensor verification are still required.
