@@ -77,12 +77,14 @@ export function createMemoryReplayStore({maxEntries=10000}={}){
   });
 }
 
-export function createVerifier({issuerKey,approverKey,audience,allowedScopes,replayStore,isRevoked,now=Date.now}={}){
+export function createVerifier({issuerKey,approverKey,audience,allowedScopes,replayStore,isRevoked,decisionStore,now=Date.now}={}){
   const issuer=key(issuerKey),approver=key(approverKey);
   const issuerId=keyFingerprint(issuer),approverId=keyFingerprint(approver);
+  const persistent=decisionStore!==undefined;
+  if(persistent ? (typeof decisionStore?.commitVerified!=='function'||replayStore!==undefined||isRevoked!==undefined)
+    : (typeof replayStore?.consume!=='function'||typeof isRevoked!=='function')) fail();
   if(issuerId===approverId||!identifier(audience)||!Array.isArray(allowedScopes)
-    ||allowedScopes.length<1||allowedScopes.length>10000||typeof replayStore?.consume!=='function'
-    ||typeof isRevoked!=='function'||typeof now!=='function') fail();
+    ||allowedScopes.length<1||allowedScopes.length>10000||typeof now!=='function') fail();
   const scopes=new Set();
   for(const scope of allowedScopes){
     if(!identifier(scope?.asset)||!identifier(scope?.action)||!modeFor(scope.action)) fail();
@@ -102,10 +104,13 @@ export function createVerifier({issuerKey,approverKey,audience,allowedScopes,rep
         if(!validSignature(issuer,capabilityBytes(c),issuerSignature)
           ||!validSignature(holder,holderProofBytes(c,expected.challenge),holderSignature)) fail();
         if(c.mode==='RED'&&!validSignature(approver,approvalBytes(c),approvalSignature)) fail();
-        // Revocation provider must return an explicit boolean false; outage/unknown denies.
-        if(isRevoked(c)!==false) fail();
-        // Must be atomic and durable across instances for any real enforcement deployment.
-        if(replayStore.consume(c.nonce,c.expiresAt,time)!==true) fail();
+        if(persistent){
+          // Revocation, halt, expiration, nonce and decision record share one transaction.
+          if(decisionStore.commitVerified(c,time)!==true) fail();
+        }else{
+          // Legacy process-local fixtures only; never use this split path for enforcement.
+          if(isRevoked(c)!==false||replayStore.consume(c.nonce,c.expiresAt,time)!==true) fail();
+        }
         return Object.freeze({authorized:true,mode:c.mode,audience:c.audience,asset:c.asset,
           action:c.action,requestHash:c.requestHash,nonce:c.nonce,expiresAt:c.expiresAt});
       }catch{
