@@ -19,14 +19,13 @@ function claims(overrides={}){
 }
 function fixture(t){
   const dir=mkdtempSync(join(tmpdir(),'hx-act-'));
-  t.after(()=>rmSync(dir,{recursive:true,force:true}));
   let time=start;
   const options={path:join(dir,'state.sqlite'),auditKey:randomBytes(32),now:()=>time};
   const genesis=initializeState(options);
   const handles=[];
   const open=extra=>{const state=openState({...options,...extra});handles.push(state);return state;};
   // Close all database handles before removing files (including on Windows).
-  t.after(()=>{for(const h of handles)h.close();});
+  t.after(()=>{for(const h of handles)h.close();rmSync(dir,{recursive:true,force:true});});
   return {options,genesis,open,setTime:x=>{time=x;}};
 }
 function verifier(state){
@@ -92,7 +91,8 @@ test('Two simultaneous worker connections cannot consume the same nonce',async t
     const w=new Worker(source,{eval:true,workerData:{url,path:f.options.path,key:f.options.auditKey.toString('hex'),start,claims:r}});
     t.after(()=>w.terminate());
     const ready=new Promise((resolve,reject)=>{w.once('message',resolve);w.once('error',reject);});
-    return {w,ready};
+    const exited=new Promise((resolve,reject)=>{w.once('exit',code=>code===0?resolve():reject(Error('Worker exit '+code)));});
+    return {w,ready,exited};
   };
   const workers=[create(),create()];
   assert.deepEqual(await Promise.all(workers.map(x=>x.ready)),['ready','ready']);
@@ -100,6 +100,7 @@ test('Two simultaneous worker connections cannot consume the same nonce',async t
     w.once('message',resolve);w.once('error',reject);w.postMessage('go');
   })));
   assert.deepEqual(results.sort(),[false,true]);
+  await Promise.all(workers.map(x=>x.exited));
   const a=f.open();assert.equal(a.verifyAudit().seq,3);
 });
 test('Ledger edits and incorrect authentication key are detected',t=>{
