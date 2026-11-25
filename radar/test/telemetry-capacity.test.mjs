@@ -8,7 +8,7 @@ const alphabet='123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 function signature(i) {
   let suffix='';
   do {suffix=alphabet[i%58]+suffix;i=Math.floor(i/58);} while(i);
-  return suffix.padStart(88,'5');
+  return '5'.repeat(83)+suffix.padStart(5,'1');
 }
 function notification(i,bytes) {
   const body=JSON.stringify({method:'logsNotification',params:{subscription:4,result:{
