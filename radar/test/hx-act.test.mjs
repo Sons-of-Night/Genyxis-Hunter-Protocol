@@ -101,6 +101,8 @@ test('Issuer, independent approver and holder must use distinct Ed25519 keys',()
 });
 test('Malformed signatures and unsupported actions cannot authorize',()=>{
   const {verifier}=fixture(),r=request();
+  denied(verifier,null);
+  denied(verifier,undefined);
   denied(verifier,{...r,issuerSignature:'a'.repeat(86)});
   denied(verifier,{...r,issuerSignature:r.issuerSignature+'='});
   denied(verifier,{...r,claims:{...r.claims,action:'unlisted-action'}});
