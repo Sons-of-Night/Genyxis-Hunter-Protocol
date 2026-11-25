@@ -5,6 +5,7 @@
  * Requires Node.js >=22 for built-in WebSocket.
  */
 import http from 'node:http';
+import {createHash, timingSafeEqual} from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createSuricataMonitor } from './kali/suricata.mjs';
 import { dirname, join } from 'node:path';
@@ -262,7 +263,31 @@ export function createRadar({
   }
   return {start,stop,snapshot,assess,checkRpc};
 }
-export function createServer(radar) {
+// Local access only: Basic credentials are never sent to a remote service.
+function createLocalAccess(env) {
+  const operator = env.HUNTER_RADAR_OPERATOR_TOKEN;
+  const viewer = env.HUNTER_RADAR_VIEWER_TOKEN;
+  const valid = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+  if (!valid(operator) || (viewer !== undefined && (!valid(viewer) || viewer === operator))) {
+    throw new Error('Configure a 64-character lowercase hex operator token and, optionally, a distinct viewer token');
+  }
+  const digest = value => createHash('sha256').update(value).digest();
+  const credential = (role, token) => digest(Buffer.from(role+':'+token,'utf8').toString('base64'));
+  const operatorDigest = credential('operator',operator);
+  const viewerDigest = viewer === undefined ? null : credential('viewer',viewer);
+  return header => {
+    if (typeof header !== 'string' || header.length > 256) return null;
+    const match = /^Basic ([A-Za-z0-9+/]+={0,2})$/i.exec(header);
+    if (!match) return null;
+    const supplied = digest(match[1]);
+    const isOperator = timingSafeEqual(operatorDigest,supplied);
+    const isViewer = viewerDigest !== null && timingSafeEqual(viewerDigest,supplied);
+    return isOperator ? 'operator' : isViewer ? 'viewer' : null;
+  };
+}
+
+export function createServer(radar, {env=process.env}={}) {
+  const authorize = createLocalAccess(env);
   const files = {'/':'index.html','/index.html':'index.html','/app.js':'app.js','/styles.css':'styles.css'};
   const server = http.createServer(async (req,res) => {
     const security = {
@@ -280,6 +305,18 @@ export function createServer(radar) {
     let url;
     try { url = new URL(req.url,'http://localhost'); }
     catch { res.writeHead(400);res.end('Invalid request target');return; }
+    // Do not trust forwarded headers or expose this local-only service via a proxy.
+    if (!['127.0.0.1','::1','::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) {
+      res.writeHead(403,{'Connection':'close'});res.end('Loopback access required');return;
+    }
+    const role = authorize(req.headers.authorization);
+    if (!role) {
+      res.writeHead(401,{'WWW-Authenticate':'Basic realm="Huntxr local", charset="UTF-8"','Connection':'close'});
+      res.end('Authentication required');return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/assess' && role !== 'operator') {
+      res.writeHead(403,{'Connection':'close'});res.end('Operator permission required');return;
+    }
     if (req.method === 'GET' && (url.pathname === '/api/snapshot' || url.pathname === '/api/health')) {
       res.writeHead(200,{'Content-Type':'application/json; charset=utf-8'});
       res.end(JSON.stringify(radar.snapshot())); return;
