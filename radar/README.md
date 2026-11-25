@@ -15,7 +15,7 @@ Hunter Radar is a separate Solana security dashboard in Genyxis Hunter Protocol.
 
 ## Start on real Solana mainnet
 
-Node.js 22 or later required. From the repository root:
+Node.js 22.13 or later required. From the repository root:
 
     cd radar
     node --version
@@ -156,7 +156,7 @@ The backend deliberately excludes source/destination IP addresses, raw payloads 
 
 ## Validate the first sensor on Kali or Ubuntu
 
-Run this on a Genyxis-owned or explicitly authorized Kali/Ubuntu host with Node.js 22 or newer, npm, and Suricata. Check prerequisites from the `radar` directory:
+Run this on a Genyxis-owned or explicitly authorized Kali/Ubuntu host with Node.js 22.13 or newer, npm, and Suricata. Check prerequisites from the `radar` directory:
 
     node --version
     suricata -V
@@ -187,4 +187,4 @@ The tests use synthetic fixtures to validate the parser and API. The running pro
 
 The Radar HTTP listener remains loopback-only. A Host matching the actual local listener, same-origin browser requests, and JSON policy submissions are required. It rejects DNS-rebinding hosts, cross-site requests and mismatched ports, and adds bounded HTTP request/header lifetimes and restrictive browser headers. The policy body limit remains **8 KiB** (not 4 KiB) to preserve the documented 64+64 address contract and interrupted-upload handling from PR #4.
 
-The boundary has deterministic regression tests in `npm test`; loopback controls are **not** authentication. Do not forward this port or expose it via a public reverse proxy or Cloudflare Tunnel without a separate authenticated, authorized service boundary. Live host and network sensor verification are still required.
+The boundary has deterministic regression tests in `npm test`; loopback Host/origin checks alone are **not** authentication; the separate credential gate is mandatory. Do not forward this port or expose it via a public reverse proxy or Cloudflare Tunnel without a separate authenticated, authorized service boundary. Live host and network sensor verification are still required.
