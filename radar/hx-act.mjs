@@ -91,8 +91,9 @@ export function createVerifier({issuerKey,approverKey,audience,allowedScopes,rep
     scopes.add(JSON.stringify([scope.asset,scope.action]));
   }
   return Object.freeze({
-    authorize({claims,issuerSignature,holderKey,holderSignature,approvalSignature,expected}={}){
+    authorize(input){
       try{
+        const {claims,issuerSignature,holderKey,holderSignature,approvalSignature,expected}=input??{};
         const c=checkedClaims(claims),time=now();
         if(!Number.isSafeInteger(time)||time<c.issuedAt||time>=c.expiresAt
           ||c.audience!==audience||c.audience!==expected?.audience
