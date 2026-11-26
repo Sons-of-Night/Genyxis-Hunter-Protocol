@@ -9,6 +9,7 @@ import {createHash, timingSafeEqual} from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createSuricataMonitor } from './kali/suricata.mjs';
 import {openEvidence} from './intelligence-core.mjs';
+import {createHunt} from './hunt-engine.mjs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -103,6 +104,7 @@ export function createRadar({
   const watch = addresses(env.HUNTER_RADAR_WATCH_ADDRESSES, MAX_WATCH);
   const deny = new Set(addresses(env.HUNTER_RADAR_DENY_ADDRESSES));
   const rpcHost = new URL(httpUrl).hostname;
+  const huntEngine = createHunt({env,now,fetchImpl});
   const evidencePath=env.HUNTER_RADAR_EVIDENCE_PATH;
   const evidenceKey=env.HUNTER_RADAR_EVIDENCE_KEY;
   if ((evidencePath!==undefined || evidenceKey!==undefined) && (!evidencePath || !/^[a-f0-9]{64}$/.test(evidenceKey??''))) throw Error('Evidence path and 32-byte hexadecimal key are required together');
@@ -321,7 +323,7 @@ export function createRadar({
     const slotAdvancing = rpcFresh && fresh(lastSlotAdvanceAt,RPC_FRESH_MS);
     const feedStatus = stopped ? 'stopped' : !connected ? 'disconnected' : !subscribed ? 'subscribing' : !chainFresh || !rpcFresh || !slotAdvancing ? 'degraded' : 'live';
     return {
-      product:'Hunter Radar', chain:'Solana', cluster:'mainnet-beta', mode:'REAL MAINNET — READ ONLY',
+      product:'Huntxr', chain:'Solana', cluster:'mainnet-beta', mode:'REAL MAINNET — READ ONLY',
       sourceHost:rpcHost, connected, subscribed, rpcOk, currentSlot, lastRpcAt,
       lastEventAt, lastError, rpcError, gapCount, rejectedMessages,
       feed:{status:feedStatus,chainFresh,rpcFresh,slotAdvancing,lastChainAt,lastRpcSuccessAt,lastSlotAdvanceAt,
@@ -335,7 +337,7 @@ export function createRadar({
       completeness:'Best-effort live feed. Provider throttling, disconnects and retention limits may omit transactions.',
       scope:'All non-vote transaction logs received from selected mainnet RPC since process start; only configured policy matches are flagged.',
       watchCount:watch.length, watchAddresses:watch, denylistSize:deny.size,
-      sessionStartedAt:startedAt, intelligence:evidenceSummary(), kali:kaliSensor.snapshot(), counters:{
+      sessionStartedAt:startedAt, hunt:huntEngine.snapshot(), intelligence:evidenceSummary(), kali:kaliSensor.snapshot(), counters:{
         observed:totalObserved, failed:totalFailed, policyMatches:totalPolicyMatches,
         watchObserved:totalWatchObserved, policyChecks:checks, denyRecommendations
       },
@@ -347,11 +349,13 @@ export function createRadar({
     if (started || stopped) return;
     started = true;
     kaliSensor.start();
+    huntEngine.start();
     connect(); void checkRpc();
     refreshTimer = setInterval(() => { void checkRpc(); },25000);
     healthTimer = setInterval(checkFeed,1000);
   }
   function stop() {
+    huntEngine.stop();
     kaliSensor.stop();
     if(evidence) evidence.close();
     stopped = true; connected=false; subscribed=false;
