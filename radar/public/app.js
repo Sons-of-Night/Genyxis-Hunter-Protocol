@@ -118,6 +118,12 @@ function render(snapshot) {
   text('rpcStatus',snapshot.feed?.rpcFresh?'RPC • SLOT '+formatter.format(snapshot.currentSlot):'RPC unavailable');
   text('lastReceived',timeAgo(snapshot.lastEventAt));
   renderKali(snapshot);
+  const hunt=snapshot.hunt;
+  text('huntFeed',hunt?.feed?.status??'unverified');
+  text('huntMatches',hunt?.inventory?.matchCount??'Unverified');
+  text('huntIntegrity',hunt?.integrity?.status??'unverified');
+  const list=byId('huntResults');
+  if(list){list.replaceChildren();for(const r of [...(hunt?.inventory?.matches??[]).map(m=>m.asset+' — '+m.cve+' (review applicability)'),...(hunt?.integrity?.results??[]).map(m=>m.id+' — '+m.status)]){const el=document.createElement('div');el.textContent=r;list.append(el);}if(!list.childElementCount)list.textContent='No current matching evidence reported; not a safety verdict.';}
   text('mObserved',formatter.format(snapshot.counters.observed));
   text('mFailed',formatter.format(snapshot.counters.failed));
   text('mWatched',formatter.format(snapshot.counters.watchObserved));
