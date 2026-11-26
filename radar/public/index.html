@@ -33,7 +33,7 @@
       <div class="top-status"><span class="mainnet">● SOLANA MAINNET</span><span id="rpcStatus">RPC checking…</span><span id="liveStatus" class="status muted">Connecting</span></div>
     </header>
     <div class="content">
-      <div class="heading"><div><p class="eyebrow">LIVE SOLANA SECURITY INTELLIGENCE</p><h1 id="pageTitle">Hunter Radar <span>Overview</span></h1><p class="sub">Real on-chain observations, configured risk signals, and pre-sign policy decisions.</p></div><div class="heading-actions"><span class="label-info" id="lastReceived">No events received</span><button id="pauseButton" class="outline">Pause view</button></div></div>
+      <div class="heading"><div><p class="eyebrow">LIVE SOLANA SECURITY INTELLIGENCE</p><h1 id="pageTitle">Huntxr <span>Overview</span></h1><p class="sub">Real on-chain observations, configured risk signals, and pre-sign policy decisions.</p></div><div class="heading-actions"><span class="label-info" id="lastReceived">No events received</span><button id="pauseButton" class="outline">Pause view</button></div></div>
       <div id="warning" class="warning" hidden></div>
 
       <section id="page-overview" class="page visible" aria-label="Overview">
@@ -66,6 +66,9 @@
             <div class="service-row"><span class="service-ico">◎</span><div><b>Address watchlist</b><small>Focused monitoring for configured accounts</small></div><span id="sWatch">Unconfigured</span></div>
             <div class="service-row"><span class="service-ico">⬡</span><div><b>Policy intelligence</b><small>Match observed programs to operator denylist</small></div><span id="sPolicy">Unconfigured</span></div>
             <div class="service-row"><span class="service-ico">◉</span><div><b>Kali / Suricata IDS</b><small>Actual alerts seen by our own network sensor</small></div><span id="sKali">Unconfigured</span></div>
+<div class="service-row"><div><b>Huntxr — known exploited vulnerabilities</b><small>Public intelligence; exact operator CVE inventory correlation</small></div><span id="huntFeed">Unverified</span></div>
+<div class="service-row"><div><b>Inventory matches</b><small>Remediation priorities, not proof of compromise</small></div><span id="huntMatches">Unverified</span></div>
+<div class="service-row"><div><b>Approved file integrity</b><small>Read-only digest comparison</small></div><span id="huntIntegrity">Unverified</span></div><div id="huntResults" class="caution">Awaiting evidence</div>
             <div class="service-row"><span class="service-ico">✓</span><div><b>Pre-sign check API</b><small>Integrated clients can honor deny decisions</small></div><span id="sAssessment">Available locally</span></div>
           </section>
         </div>
