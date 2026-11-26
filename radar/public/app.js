@@ -118,6 +118,12 @@ function render(snapshot) {
   text('rpcStatus',snapshot.feed?.rpcFresh?'RPC • SLOT '+formatter.format(snapshot.currentSlot):'RPC unavailable');
   text('lastReceived',timeAgo(snapshot.lastEventAt));
   renderKali(snapshot);
+  const hunt=snapshot.hunt;
+  text('huntFeed',hunt?.feed?.status??'unverified');
+  text('huntMatches',hunt?.inventory?.matchCount??'Unverified');
+  text('huntIntegrity',hunt?.integrity?.status??'unverified');
+  const list=byId('huntResults');
+  if(list){list.replaceChildren();for(const r of [...(hunt?.inventory?.matches??[]).map(m=>m.asset+' — '+m.cve+' (review applicability)'),...(hunt?.integrity?.results??[]).map(m=>m.id+' — '+m.status)]){const el=document.createElement('div');el.textContent=r;list.append(el);}if(!list.childElementCount)list.textContent='No current matching evidence reported; not a safety verdict.';}
   text('mObserved',formatter.format(snapshot.counters.observed));
   text('mFailed',formatter.format(snapshot.counters.failed));
   text('mWatched',formatter.format(snapshot.counters.watchObserved));
@@ -131,6 +137,8 @@ function render(snapshot) {
   text('feedCount',snapshot.events.length+' recent');
   text('coverage','Session started '+new Date(snapshot.sessionStartedAt).toLocaleTimeString()+' • Coverage gaps: '+snapshot.gapCount);
   const warnings=[];
+  if(snapshot.intelligence?.status==='failed') warnings.push('Durable evidence recording FAILED. Do not rely on this session as a complete incident record.');
+  else if(snapshot.intelligence?.status!=='recording') warnings.push('Durable evidence archive is not active.');
   if(!connected) warnings.push('Live mainnet feed is not verified current. No protection or full coverage can be claimed.');
   if(snapshot.feed && !snapshot.feed.chainFresh) warnings.push('Current connection has no recent chain-wide observation.');
   if(snapshot.feed && !snapshot.feed.slotAdvancing) warnings.push('Recent RPC slot advancement has not been verified.');

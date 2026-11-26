@@ -37,7 +37,7 @@ export function parseSuricataAlert(line, observedAt = Date.now()) {
   };
 }
 
-export function createSuricataMonitor(file, {now = () => Date.now(), statFile = stat, openFile = open} = {}) {
+export function createSuricataMonitor(file, {now = () => Date.now(), statFile = stat, openFile = open, onAlert = () => {}, onGap = () => {}} = {}) {
   const configured = typeof file === 'string' && file.startsWith('/') && !file.includes('\0');
   let cursor = null;
   let lastError = configured ? null : 'No Suricata EVE file configured';
@@ -50,6 +50,7 @@ export function createSuricataMonitor(file, {now = () => Date.now(), statFile = 
   let running = false;
   let timer = null;
   const items = [];
+  function noteGap(){rotationOrSkipCount++;onGap();}
 
   async function poll() {
     if (!configured || running) return;
@@ -63,13 +64,13 @@ export function createSuricataMonitor(file, {now = () => Date.now(), statFile = 
         buffer = '';
       } else {
         if (meta.ino !== cursor.ino || meta.size < cursor.offset) {
-          rotationOrSkipCount++;
+          noteGap();
           cursor = {ino:meta.ino,offset:0};buffer = '';
         }
         if (meta.size - cursor.offset > BATCH_BYTES * 8) {
           // The source grew too rapidly to safely process without unbounded lag.
           // Declare a gap and resume near the end rather than invent complete coverage.
-          rotationOrSkipCount++;
+          noteGap();
           cursor.offset = Math.max(0,meta.size-BATCH_BYTES);
           buffer = '';
           const skipPartial = true;
@@ -87,7 +88,7 @@ export function createSuricataMonitor(file, {now = () => Date.now(), statFile = 
           buffer += bytes.subarray(0,bytesRead).toString('utf8');
           if(buffer.length > MAX_LINE_BYTES + BATCH_BYTES) {
             buffer = buffer.slice(-MAX_LINE_BYTES);
-            rotationOrSkipCount++;
+            noteGap();
           }
           const lines = buffer.split('\n');
           buffer = lines.pop() || '';
@@ -98,6 +99,7 @@ export function createSuricataMonitor(file, {now = () => Date.now(), statFile = 
             alerts++;
             if(event.action==='sensor-reported-block') sensorReportedBlocks++;
             items.push(event);
+            onAlert(event);
             if(items.length>MAX_EVENTS) items.shift();
           }
         }
